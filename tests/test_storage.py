@@ -1,0 +1,396 @@
+"""
+Tests for the storage module.
+"""
+
+import pytest
+import sqlite3
+import json
+import tempfile
+from pathlib import Path
+
+from newsagger.storage import NewsStorage
+from newsagger.processor import NewspaperInfo, PageInfo
+
+
+class TestNewsStorage:
+    """Test cases for NewsStorage."""
+    
+    def test_init_creates_database(self, temp_db):
+        """Test that storage initialization creates database and tables."""
+        storage = NewsStorage(temp_db)
+        
+        # Check that database file exists
+        assert Path(temp_db).exists()
+        
+        # Check that tables exist
+        with sqlite3.connect(temp_db) as conn:
+            cursor = conn.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name IN ('newspapers', 'pages', 'download_sessions')
+            """)
+            tables = [row[0] for row in cursor.fetchall()]
+            
+        assert 'newspapers' in tables
+        assert 'pages' in tables
+        assert 'download_sessions' in tables
+    
+    def test_init_creates_indices(self, temp_db):
+        """Test that storage initialization creates database indices."""
+        storage = NewsStorage(temp_db)
+        
+        with sqlite3.connect(temp_db) as conn:
+            cursor = conn.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='index' AND name LIKE 'idx_%'
+            """)
+            indices = [row[0] for row in cursor.fetchall()]
+        
+        expected_indices = ['idx_pages_lccn', 'idx_pages_date', 'idx_pages_downloaded']
+        for idx in expected_indices:
+            assert idx in indices
+    
+    def test_store_newspapers(self, storage, sample_newspaper_data):
+        """Test storing newspaper data."""
+        newspaper = NewspaperInfo.from_api_response(sample_newspaper_data)
+        newspapers = [newspaper]
+        
+        inserted = storage.store_newspapers(newspapers)
+        
+        assert inserted == 1
+        
+        # Verify data was stored correctly
+        with sqlite3.connect(storage.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM newspapers WHERE lccn = ?", (newspaper.lccn,))
+            row = cursor.fetchone()
+        
+        assert row is not None
+        assert row['lccn'] == 'sn84038012'
+        assert row['title'] == 'The San Francisco Call'
+        assert json.loads(row['place_of_publication']) == ['San Francisco, Calif.']
+        assert row['start_year'] == 1895
+        assert row['end_year'] == 1913
+    
+    def test_store_newspapers_duplicate_handling(self, storage, sample_newspaper_data):
+        """Test storing duplicate newspapers (should replace)."""
+        newspaper = NewspaperInfo.from_api_response(sample_newspaper_data)
+        
+        # Store same newspaper twice
+        storage.store_newspapers([newspaper])
+        storage.store_newspapers([newspaper])
+        
+        # Should only have one record
+        with sqlite3.connect(storage.db_path) as conn:
+            cursor = conn.execute("SELECT COUNT(*) FROM newspapers WHERE lccn = ?", (newspaper.lccn,))
+            count = cursor.fetchone()[0]
+        
+        assert count == 1
+    
+    def test_store_pages(self, storage, sample_page_data):
+        """Test storing page data."""
+        page = PageInfo.from_search_result(sample_page_data)
+        pages = [page]
+        
+        inserted = storage.store_pages(pages)
+        
+        assert inserted == 1
+        
+        # Verify data was stored correctly
+        with sqlite3.connect(storage.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM pages WHERE item_id = ?", (page.item_id,))
+            row = cursor.fetchone()
+        
+        assert row is not None
+        assert row['item_id'] == 'item123'
+        assert row['lccn'] == 'sn84038012'
+        assert row['title'] == 'The San Francisco Call'
+        assert row['date'] == '1906-04-18'
+        assert row['downloaded'] == 0  # False
+    
+    def test_get_newspapers_all(self, storage):
+        """Test retrieving all newspapers."""
+        # Store test data
+        newspapers = [
+            NewspaperInfo(
+                lccn='ca1', title='CA Paper', place_of_publication=['San Francisco, California'],
+                start_year=1900, end_year=1920, frequency='Daily', subject=[], language=['English'], url=''
+            ),
+            NewspaperInfo(
+                lccn='ny1', title='NY Paper', place_of_publication=['New York, New York'],
+                start_year=1900, end_year=1920, frequency='Daily', subject=[], language=['English'], url=''
+            )
+        ]
+        storage.store_newspapers(newspapers)
+        
+        # Retrieve all
+        retrieved = storage.get_newspapers()
+        
+        assert len(retrieved) == 2
+        assert retrieved[0]['lccn'] in ['ca1', 'ny1']
+        assert retrieved[1]['lccn'] in ['ca1', 'ny1']
+    
+    def test_get_newspapers_filter_by_state(self, storage):
+        """Test retrieving newspapers filtered by state."""
+        newspapers = [
+            NewspaperInfo(
+                lccn='ca1', title='CA Paper', place_of_publication=['San Francisco, California'],
+                start_year=1900, end_year=1920, frequency='Daily', subject=[], language=['English'], url=''
+            ),
+            NewspaperInfo(
+                lccn='ny1', title='NY Paper', place_of_publication=['New York, New York'],
+                start_year=1900, end_year=1920, frequency='Daily', subject=[], language=['English'], url=''
+            )
+        ]
+        storage.store_newspapers(newspapers)
+        
+        # Filter by state
+        ca_papers = storage.get_newspapers(state='California')
+        
+        assert len(ca_papers) == 1
+        assert ca_papers[0]['lccn'] == 'ca1'
+    
+    def test_get_newspapers_filter_by_language(self, storage):
+        """Test retrieving newspapers filtered by language."""
+        newspapers = [
+            NewspaperInfo(
+                lccn='en1', title='English Paper', place_of_publication=['Test City'],
+                start_year=1900, end_year=1920, frequency='Daily', subject=[], language=['English'], url=''
+            ),
+            NewspaperInfo(
+                lccn='es1', title='Spanish Paper', place_of_publication=['Test City'],
+                start_year=1900, end_year=1920, frequency='Daily', subject=[], language=['Spanish'], url=''
+            )
+        ]
+        storage.store_newspapers(newspapers)
+        
+        # Filter by language
+        spanish_papers = storage.get_newspapers(language='Spanish')
+        
+        assert len(spanish_papers) == 1
+        assert spanish_papers[0]['lccn'] == 'es1'
+    
+    def test_get_pages_all(self, storage):
+        """Test retrieving all pages."""
+        pages = [
+            PageInfo(
+                item_id='item1', lccn='test1', title='Test Paper 1', date='1900-01-01',
+                edition=1, sequence=1, page_url='http://test1.com', pdf_url=None,
+                jp2_url=None, ocr_text=None, word_count=None
+            ),
+            PageInfo(
+                item_id='item2', lccn='test2', title='Test Paper 2', date='1900-01-02',
+                edition=1, sequence=1, page_url='http://test2.com', pdf_url=None,
+                jp2_url=None, ocr_text=None, word_count=None
+            )
+        ]
+        storage.store_pages(pages)
+        
+        retrieved = storage.get_pages()
+        
+        assert len(retrieved) == 2
+        assert retrieved[0]['item_id'] in ['item1', 'item2']
+        assert retrieved[1]['item_id'] in ['item1', 'item2']
+    
+    def test_get_pages_filter_by_lccn(self, storage):
+        """Test retrieving pages filtered by LCCN."""
+        pages = [
+            PageInfo(
+                item_id='item1', lccn='test1', title='Test Paper 1', date='1900-01-01',
+                edition=1, sequence=1, page_url='http://test1.com', pdf_url=None,
+                jp2_url=None, ocr_text=None, word_count=None
+            ),
+            PageInfo(
+                item_id='item2', lccn='test2', title='Test Paper 2', date='1900-01-02',
+                edition=1, sequence=1, page_url='http://test2.com', pdf_url=None,
+                jp2_url=None, ocr_text=None, word_count=None
+            )
+        ]
+        storage.store_pages(pages)
+        
+        filtered = storage.get_pages(lccn='test1')
+        
+        assert len(filtered) == 1
+        assert filtered[0]['lccn'] == 'test1'
+    
+    def test_get_pages_filter_by_date_range(self, storage):
+        """Test retrieving pages filtered by date range."""
+        pages = [
+            PageInfo(
+                item_id='item1', lccn='test1', title='Test Paper 1', date='1900-01-01',
+                edition=1, sequence=1, page_url='http://test1.com', pdf_url=None,
+                jp2_url=None, ocr_text=None, word_count=None
+            ),
+            PageInfo(
+                item_id='item2', lccn='test1', title='Test Paper 1', date='1900-06-15',
+                edition=1, sequence=1, page_url='http://test2.com', pdf_url=None,
+                jp2_url=None, ocr_text=None, word_count=None
+            ),
+            PageInfo(
+                item_id='item3', lccn='test1', title='Test Paper 1', date='1901-01-01',
+                edition=1, sequence=1, page_url='http://test3.com', pdf_url=None,
+                jp2_url=None, ocr_text=None, word_count=None
+            )
+        ]
+        storage.store_pages(pages)
+        
+        filtered = storage.get_pages(date_range=('1900-01-01', '1900-12-31'))
+        
+        assert len(filtered) == 2
+        assert all(page['date'].startswith('1900') for page in filtered)
+    
+    def test_mark_page_downloaded(self, storage, sample_page_data):
+        """Test marking a page as downloaded."""
+        page = PageInfo.from_search_result(sample_page_data)
+        storage.store_pages([page])
+        
+        # Initially not downloaded
+        pages = storage.get_pages(downloaded_only=True)
+        assert len(pages) == 0
+        
+        # Mark as downloaded
+        storage.mark_page_downloaded(page.item_id)
+        
+        # Should now appear in downloaded filter
+        pages = storage.get_pages(downloaded_only=True)
+        assert len(pages) == 1
+        assert pages[0]['item_id'] == page.item_id
+        assert pages[0]['downloaded'] == 1  # True
+    
+    def test_create_download_session(self, storage):
+        """Test creating a download session."""
+        query_params = {'lccn': 'test123', 'date1': '1900', 'date2': '1910'}
+        
+        session_id = storage.create_download_session(
+            'test_session', query_params, 1000
+        )
+        
+        assert session_id is not None
+        assert isinstance(session_id, int)
+        
+        # Verify session was created
+        with sqlite3.connect(storage.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM download_sessions WHERE id = ?", (session_id,))
+            row = cursor.fetchone()
+        
+        assert row is not None
+        assert row['session_name'] == 'test_session'
+        assert json.loads(row['query_params']) == query_params
+        assert row['total_expected'] == 1000
+        assert row['total_downloaded'] == 0
+        assert row['status'] == 'active'
+    
+    def test_update_session_progress(self, storage):
+        """Test updating download session progress."""
+        session_id = storage.create_download_session('test', {}, 1000)
+        
+        storage.update_session_progress(session_id, 250)
+        
+        # Verify update
+        with sqlite3.connect(storage.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT total_downloaded FROM download_sessions WHERE id = ?", 
+                (session_id,)
+            )
+            downloaded = cursor.fetchone()[0]
+        
+        assert downloaded == 250
+    
+    def test_complete_session(self, storage):
+        """Test completing a download session."""
+        session_id = storage.create_download_session('test', {}, 1000)
+        
+        storage.complete_session(session_id)
+        
+        # Verify completion
+        with sqlite3.connect(storage.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM download_sessions WHERE id = ?", (session_id,))
+            row = cursor.fetchone()
+        
+        assert row['status'] == 'completed'
+        assert row['completed_at'] is not None
+    
+    def test_get_session_stats(self, storage):
+        """Test retrieving session statistics."""
+        query_params = {'lccn': 'test123'}
+        session_id = storage.create_download_session('test', query_params, 1000)
+        storage.update_session_progress(session_id, 500)
+        
+        stats = storage.get_session_stats(session_id)
+        
+        assert stats is not None
+        assert stats['session_name'] == 'test'
+        assert stats['total_expected'] == 1000
+        assert stats['total_downloaded'] == 500
+        assert stats['status'] == 'active'
+    
+    def test_get_session_stats_nonexistent(self, storage):
+        """Test retrieving stats for nonexistent session."""
+        stats = storage.get_session_stats(99999)
+        assert stats is None
+    
+    def test_get_storage_stats(self, storage):
+        """Test retrieving overall storage statistics."""
+        # Add some test data
+        newspapers = [
+            NewspaperInfo(
+                lccn='test1', title='Test Paper 1', place_of_publication=['Test City'],
+                start_year=1900, end_year=1920, frequency='Daily', subject=[], language=['English'], url=''
+            )
+        ]
+        pages = [
+            PageInfo(
+                item_id='item1', lccn='test1', title='Test Paper 1', date='1900-01-01',
+                edition=1, sequence=1, page_url='http://test1.com', pdf_url=None,
+                jp2_url=None, ocr_text=None, word_count=None
+            ),
+            PageInfo(
+                item_id='item2', lccn='test1', title='Test Paper 1', date='1900-01-02',
+                edition=1, sequence=1, page_url='http://test2.com', pdf_url=None,
+                jp2_url=None, ocr_text=None, word_count=None
+            )
+        ]
+        
+        storage.store_newspapers(newspapers)
+        storage.store_pages(pages)
+        storage.mark_page_downloaded('item1')
+        session_id = storage.create_download_session('test', {}, 100)
+        
+        stats = storage.get_storage_stats()
+        
+        assert stats['total_newspapers'] == 1
+        assert stats['total_pages'] == 2
+        assert stats['downloaded_pages'] == 1
+        assert stats['active_sessions'] == 1
+        assert stats['db_size_mb'] >= 0  # File exists and has some size
+    
+    def test_store_newspapers_with_invalid_data(self, storage, caplog):
+        """Test storing newspapers with some invalid entries."""
+        # Create a newspaper with None values that might cause issues
+        newspapers = [
+            NewspaperInfo(
+                lccn='valid1', title='Valid Paper', place_of_publication=['Test City'],
+                start_year=1900, end_year=1920, frequency='Daily', subject=[], language=['English'], url=''
+            )
+        ]
+        
+        # This should work fine
+        inserted = storage.store_newspapers(newspapers)
+        assert inserted == 1
+    
+    def test_database_path_creation(self):
+        """Test that database directory is created if it doesn't exist."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            # Use a path with nested directories that definitely doesn't exist
+            nested_path = Path(temp_dir) / 'nested' / 'path' / 'test.db'
+            
+            # Directory shouldn't exist initially
+            assert not nested_path.parent.exists()
+            
+            # Creating storage should create the directory
+            storage = NewsStorage(str(nested_path))
+            
+            assert nested_path.parent.exists()
+            assert nested_path.exists()
