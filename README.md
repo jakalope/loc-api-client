@@ -1,204 +1,245 @@
-# Newsagger
+# LoC Chronicling America Client
 
-A Python tool for downloading and processing complete news archives from the Library of Congress Chronicling America collection.
+A comprehensive Python client for the Library of Congress Chronicling America API, designed for systematic discovery, queuing, and downloading of historical newspaper archives.
 
-## Features
+## Overview
 
-- **Rate-limited API access** - Respects LOC's 20 requests/minute limit with automatic CAPTCHA/429 handling
-- **Faceted search** - Avoids deep paging limits by using date facets for large result sets
-- **Resumable downloads** - SQLite-based storage tracks progress and allows resuming interrupted downloads
-- **Metadata extraction** - Stores newspaper and page metadata for offline analysis
-- **Interactive CLI** - Easy-to-use command line interface for browsing and downloading
+The **LoC Chronicling America Client** provides automated workflows for large-scale newspaper archive collection from the Library of Congress's Chronicling America digital collection. Built specifically for the LoC API, it handles the complexities of rate limiting, faceted search pagination, and systematic content discovery.
+
+## Key Features
+
+### 🔍 **Automated Discovery & Queuing**
+- **Systematic periodical discovery** - Automatically catalog all available newspapers
+- **Intelligent facet creation** - Generate date ranges and state-based search facets
+- **Priority-based queuing** - Smart download queue management with size limits
+- **Complete workflow automation** - End-to-end setup from discovery to download
+
+### 📥 **Robust Download Processing**
+- **Queue-based downloads** - Process thousands of items systematically
+- **Multiple file formats** - PDF, JP2 images, OCR text, and metadata
+- **Organized file structure** - Hierarchical storage by LCCN/year/month
+- **Resume capability** - Automatic retry of failed downloads
+- **Progress tracking** - Real-time progress bars and statistics
+
+### 🛡️ **API Compliance & Reliability**
+- **Rate limiting compliance** - Respects LoC's 20 requests/minute limit
+- **CAPTCHA/429 handling** - Automatic 1-hour pause on rate limit detection
+- **Faceted search optimization** - Avoids deep paging limits (100,000+ results)
+- **Error recovery** - Graceful handling of timeouts and network issues
+
+### 📊 **Advanced Management**
+- **Comprehensive statistics** - Track discovery progress and download metrics
+- **Flexible filtering** - Download by priority, type, date range, or state
+- **Database tracking** - SQLite-based metadata and progress storage
+- **Interactive CLI** - Full-featured command-line interface
 
 ## Quick Start
 
-1. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. **Set up configuration:**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your preferred settings
-   ```
-
-3. **List available newspapers:**
-   ```bash
-   python main.py list-newspapers
-   ```
-
-4. **Search for specific newspapers:**
-   ```bash
-   python main.py search-newspapers --state "California" --limit 5
-   ```
-
-5. **Download a newspaper's pages:**
-   ```bash
-   python main.py download-newspaper sn84038012 --date1 1900 --date2 1910
-   ```
-
-6. **Search for text across archives:**
-   ```bash
-   python main.py search-text "earthquake" --date1 1906 --date2 1907
-   ```
-
-## Bulk Download Examples
-
-### Download Entire State Collections
-
-Download all California newspapers from 1900-1920:
+### 1. Setup Environment
 ```bash
-# First, find California newspapers
-python main.py search-newspapers --state "California" --limit 50
-
-# Download each newspaper individually (recommended for large collections)
-python main.py download-newspaper sn84038012 --date1 1900 --date2 1920
-python main.py download-newspaper sn85066387 --date1 1900 --date2 1920
+# Clone and setup
+git clone <repository-url>
+cd newsagger
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-### Download by Decade Facets
-
-Download newspapers by decade to manage large collections:
+### 2. Basic Discovery & Download
 ```bash
-# Download 1900s decade
-python main.py download-newspaper sn84038012 --date1 1900 --date2 1909
+# Complete automated workflow for California newspapers (1906)
+python main.py setup-download-workflow \
+  --start-year 1906 --end-year 1906 \
+  --states "California" \
+  --auto-discover --auto-enqueue \
+  --max-size-gb 1.0
 
-# Download 1910s decade  
-python main.py download-newspaper sn84038012 --date1 1910 --date2 1919
+# Process the download queue
+python main.py process-downloads --max-items 10
 ```
 
-### Estimate Before Downloading
-
-Always check download size before starting large collections:
+### 3. Monitor Progress
 ```bash
-# Get size estimate without downloading
-python main.py download-newspaper sn84038012 --date1 1900 --date2 1920 --estimate-only
+# Check overall system status
+python main.py discovery-status
 
-# Example output:
-# 📊 Download Estimate for sn84038012:
-#    Total pages: 45,230
-#    Estimated size: 113.1 GB
-#    Estimated time: 37.7 hours
+# View download queue
+python main.py show-queue --limit 10
+
+# Check download statistics
+python main.py download-stats
 ```
 
-### Systematic State-by-State Collection
+## Complete Workflow Examples
 
-For comprehensive historical research:
+### 🏛️ **Large-Scale Historical Collection**
 ```bash
-# 1. List all newspapers to understand scope
-python main.py list-newspapers > newspapers_list.txt
+# 1. Discover all available periodicals
+python main.py discover --max-papers 1000
 
-# 2. Focus on specific states and time periods
-python main.py search-newspapers --state "New York" --limit 20
-python main.py search-newspapers --state "California" --limit 20
+# 2. Create systematic date facets
+python main.py create-facets --start-year 1900 --end-year 1920 --facet-size 1
 
-# 3. Download major newspapers by decade
-python main.py download-newspaper sn83030214 --date1 1900 --date2 1909  # NY Times
-python main.py download-newspaper sn85066387 --date1 1900 --date2 1909  # SF Chronicle
+# 3. Auto-discover content for all facets
+python main.py auto-discover-facets --auto-enqueue --max-items 1000
 
-# 4. Monitor progress
-python main.py status
+# 4. Process high-priority downloads first
+python main.py download-priority --priority 1 --max-items 50
+
+# 5. Monitor progress
+python main.py discovery-status
 ```
 
-### Text-Based Historical Research
-
-Search across multiple time periods for specific events:
+### 📰 **Focused State/Event Collection**
 ```bash
-# Search for Civil War coverage
-python main.py search-text "civil war" --date1 1861 --date2 1865 --limit 500
+# San Francisco earthquake coverage (1906)
+python main.py setup-download-workflow \
+  --start-year 1906 --end-year 1906 \
+  --states "California" \
+  --auto-discover --auto-enqueue \
+  --max-size-gb 5.0
 
-# Search for economic events
-python main.py search-text "stock market" --date1 1929 --date2 1932 --limit 200
-
-# Search for technology adoption
-python main.py search-text "automobile" --date1 1900 --date2 1920 --limit 300
+# WWI era coverage (1917-1919)  
+python main.py setup-download-workflow \
+  --start-year 1917 --end-year 1919 \
+  --states "New York,Illinois,California" \
+  --auto-discover --auto-enqueue \
+  --max-size-gb 10.0
 ```
 
-### Managing Large Downloads
-
-Best practices for multi-terabyte collections:
+### 🔍 **Research-Focused Discovery**
 ```bash
-# 1. Start with estimates to plan storage
-python main.py download-newspaper sn84038012 --estimate-only
+# Test discovery with small dataset
+python main.py test-discovery --year 1906 --max-items 20
 
-# 2. Download in smaller time chunks
-python main.py download-newspaper sn84038012 --date1 1900 --date2 1905
-python main.py download-newspaper sn84038012 --date1 1906 --date2 1910
+# Search for specific content
+python main.py search-text "earthquake" --date1 1906 --date2 1907 --limit 100
 
-# 3. Check progress regularly
-python main.py status
-
-# 4. Resume interrupted downloads (automatically handled)
-python main.py download-newspaper sn84038012 --date1 1900 --date2 1920
+# Download specific newspaper
+python main.py download-newspaper sn84038012 --date1 1906 --date2 1906
 ```
 
-## Commands
+## Advanced Commands
 
-- `list-newspapers` - Fetch and display all available newspapers
-- `search-newspapers` - Search newspapers with filters (state, language)
-- `download-newspaper LCCN` - Download pages for a specific newspaper
-- `search-text TEXT` - Search for text across newspaper archives
-- `status` - Show download progress and database statistics
+### Discovery & Planning
+- `discover` - Catalog available periodicals from LoC
+- `create-facets` - Create systematic date/state facets
+- `auto-discover-facets` - Systematically discover content for all facets
+- `test-discovery` - Test discovery with focused datasets
+- `discovery-status` - Comprehensive discovery progress
+
+### Queue Management
+- `auto-enqueue` - Automatically queue discovered content
+- `populate-queue` - Populate queue with priority settings
+- `show-queue` - View queued items with filtering
+- `list-facets` - View facet status and progress
+
+### Download Processing
+- `process-downloads` - Main download queue processor
+- `download-page` - Download individual pages
+- `download-priority` - Download by priority/type
+- `resume-downloads` - Resume failed downloads
+- `download-stats` - Comprehensive download statistics
+- `cleanup-downloads` - Clean incomplete files
+
+### Workflow Automation
+- `setup-download-workflow` - Complete automated setup
+- `status` - Overall system status
+- `search-newspapers` - Search available newspapers
+- `search-text` - Search content across archives
 
 ## Configuration
 
-Environment variables (see `.env.example`):
+Environment variables (`.env` file):
+```bash
+# API Settings
+REQUEST_DELAY=3.0          # Seconds between requests (min 3.0)
+MAX_RETRIES=3              # API retry attempts
 
-- `REQUEST_DELAY` - Seconds between API requests (minimum 3.0)
-- `DATABASE_PATH` - SQLite database location
-- `DOWNLOAD_DIR` - Directory for downloaded files
-- `LOG_LEVEL` - Logging verbosity (DEBUG, INFO, WARNING, ERROR)
+# Storage Settings  
+DATABASE_PATH=./data/newsagger.db
+DOWNLOAD_DIR=./downloads
 
-## Architecture
+# Logging
+LOG_LEVEL=INFO             # DEBUG, INFO, WARNING, ERROR
+```
 
-- **API Client** (`api_client.py`) - Handles LOC API interactions with rate limiting
-- **Data Processor** (`processor.py`) - Processes and validates API responses
-- **Storage Layer** (`storage.py`) - SQLite-based metadata and progress storage
-- **CLI Interface** (`cli.py`) - Command-line user interface
-- **Configuration** (`config.py`) - Environment-based configuration management
+## Project Structure
 
-## Rate Limiting
+```
+newsagger/
+├── src/newsagger/
+│   ├── api_client.py      # LoC API client with rate limiting
+│   ├── discovery.py       # Automated discovery and queuing
+│   ├── downloader.py      # Download queue processor
+│   ├── processor.py       # API response processing
+│   ├── storage.py         # SQLite database operations
+│   ├── config.py          # Configuration management
+│   └── cli.py             # Command-line interface
+├── tests/                 # Comprehensive test suite
+├── downloads/             # Downloaded content (auto-created)
+├── data/                  # Database storage (auto-created)
+└── main.py               # CLI entry point
+```
 
-The tool enforces LOC's rate limits:
-- Maximum 20 requests per minute
-- Automatic 1-hour pause on 429 responses or CAPTCHA detection
-- Faceted search to stay under 100,000 result limits per query
+## API Compliance
 
-## Data Storage
+### Library of Congress Guidelines
+- **Rate Limiting**: 20 requests/minute maximum
+- **Deep Paging**: Limited to 100,000 items per query
+- **Timeout Handling**: 1-hour pause on 429/CAPTCHA responses
+- **Faceted Search**: Uses date/state facets to manage large result sets
 
-- **Newspapers table** - Stores newspaper metadata (title, location, date ranges)
-- **Pages table** - Stores individual page metadata and download status
-- **Download sessions** - Tracks progress of bulk download operations
-- **Automatic deduplication** - Prevents duplicate entries across faceted searches
+### Best Practices
+- Always use `--estimate-only` for large downloads
+- Start with small test datasets (`test-discovery`)
+- Monitor progress with `discovery-status` and `download-stats`
+- Use priority downloads for time-sensitive research
+- Set reasonable size limits with `--max-size-gb`
+
+## Data Organization
+
+### File Structure
+```
+downloads/
+└── {lccn}/           # Library of Congress Control Number
+    └── {year}/       # Publication year
+        └── {month}/  # Publication month
+            ├── {item_id}.pdf           # Page PDF
+            ├── {item_id}.jp2           # Page image
+            ├── {item_id}_ocr.txt       # OCR text
+            └── {item_id}_metadata.json # Complete metadata
+```
+
+### Database Schema
+- **Periodicals** - Newspaper metadata and discovery tracking
+- **Search Facets** - Date/state facets with progress tracking  
+- **Pages** - Individual page metadata and download status
+- **Download Queue** - Priority-based download management
+- **Sessions** - Progress tracking for bulk operations
 
 ## Testing
 
-Run the comprehensive test suite:
-
 ```bash
 # Install test dependencies
-pip install pytest pytest-mock responses
+pip install pytest pytest-mock
 
-# Run all tests
-python run_tests.py
+# Run comprehensive test suite
+python -m pytest tests/ -v
 
-# Or run pytest directly
-pytest tests/
+# Test specific components
+python -m pytest tests/test_downloader.py -v
+python -m pytest tests/test_discovery_automation.py -v
 
-# Run specific test categories
-pytest tests/test_api_client.py -v
-pytest tests/test_integration.py -v
-
-# Run with coverage (requires pytest-cov)
+# Run with coverage
 pip install pytest-cov
-pytest --cov=newsagger --cov-report=html tests/
+python -m pytest --cov=src/newsagger tests/
 ```
 
-**Test Coverage:**
-- **Unit Tests** - Individual component testing (API client, processor, storage, config)
-- **Integration Tests** - End-to-end workflow testing
-- **Mock API Responses** - Tests work without actual API calls
-- **Error Handling** - Rate limiting, network errors, invalid data
-- **Database Operations** - SQLite storage and retrieval
-- **Configuration** - Environment variable handling
+## Contributing
+
+This project focuses specifically on the Library of Congress Chronicling America API. Contributions should maintain compatibility with LoC's API structure and rate limiting requirements.
+
+## License
+
+Educational and research use. Respects Library of Congress terms of service and API guidelines.
