@@ -788,13 +788,24 @@ def show_queue(status, limit):
 @click.option('--max-items', default=None, type=int, help='Maximum items to download')
 @click.option('--max-size-mb', default=None, type=float, help='Maximum total download size in MB')
 @click.option('--download-dir', default='./downloads', help='Directory to store downloaded files')
+@click.option('--file-types', default='pdf,jp2,ocr,metadata', help='Comma-separated file types to download (pdf,jp2,ocr,metadata)')
 @click.option('--dry-run', is_flag=True, help='Show what would be downloaded without actually doing it')
-def process_downloads(max_items, max_size_mb, download_dir, dry_run):
+def process_downloads(max_items, max_size_mb, download_dir, file_types, dry_run):
     """Process the download queue and download files."""
     config = Config()
     storage = NewsStorage(**config.get_storage_config())
     client = LocApiClient(**config.get_api_config())
-    downloader = DownloadProcessor(storage, client, download_dir)
+    
+    # Parse file types
+    file_types_list = [ft.strip().lower() for ft in file_types.split(',')]
+    valid_types = {'pdf', 'jp2', 'ocr', 'metadata'}
+    invalid_types = set(file_types_list) - valid_types
+    if invalid_types:
+        click.echo(f"❌ Invalid file types: {', '.join(invalid_types)}")
+        click.echo(f"Valid types: {', '.join(sorted(valid_types))}")
+        return
+    
+    downloader = DownloadProcessor(storage, client, download_dir, file_types_list)
     
     action = "Would process" if dry_run else "Processing"
     click.echo(f"📥 {action} download queue...")
@@ -803,6 +814,7 @@ def process_downloads(max_items, max_size_mb, download_dir, dry_run):
     if max_size_mb:
         click.echo(f"   💾 Max size: {max_size_mb} MB")
     click.echo(f"   📁 Download directory: {download_dir}")
+    click.echo(f"   📄 File types: {', '.join(file_types_list)}")
     
     try:
         stats = downloader.process_queue(
@@ -838,12 +850,23 @@ def process_downloads(max_items, max_size_mb, download_dir, dry_run):
 @cli.command()
 @click.argument('item_id')
 @click.option('--download-dir', default='./downloads', help='Directory to store downloaded files')
-def download_page(item_id, download_dir):
+@click.option('--file-types', default='pdf,jp2,ocr,metadata', help='Comma-separated file types to download (pdf,jp2,ocr,metadata)')
+def download_page(item_id, download_dir, file_types):
     """Download a specific page by item ID."""
     config = Config()
     storage = NewsStorage(**config.get_storage_config())
     client = LocApiClient(**config.get_api_config())
-    downloader = DownloadProcessor(storage, client, download_dir)
+    
+    # Parse file types
+    file_types_list = [ft.strip().lower() for ft in file_types.split(',')]
+    valid_types = {'pdf', 'jp2', 'ocr', 'metadata'}
+    invalid_types = set(file_types_list) - valid_types
+    if invalid_types:
+        click.echo(f"❌ Invalid file types: {', '.join(invalid_types)}")
+        click.echo(f"Valid types: {', '.join(sorted(valid_types))}")
+        return
+    
+    downloader = DownloadProcessor(storage, client, download_dir, file_types_list)
     
     click.echo(f"📥 Downloading page {item_id}...")
     
@@ -959,12 +982,23 @@ def cleanup_downloads(download_dir):
 @click.option('--queue-type', help='Only download items of this type (page, facet, periodical)')
 @click.option('--max-items', default=10, type=int, help='Maximum items to download')
 @click.option('--download-dir', default='./downloads', help='Directory to store files')
-def download_priority(priority, queue_type, max_items, download_dir):
+@click.option('--file-types', default='pdf,jp2,ocr,metadata', help='Comma-separated file types to download (pdf,jp2,ocr,metadata)')
+def download_priority(priority, queue_type, max_items, download_dir, file_types):
     """Download items from queue with specific priority or type."""
     config = Config()
     storage = NewsStorage(**config.get_storage_config())
     client = LocApiClient(**config.get_api_config())
-    downloader = DownloadProcessor(storage, client, download_dir)
+    
+    # Parse file types
+    file_types_list = [ft.strip().lower() for ft in file_types.split(',')]
+    valid_types = {'pdf', 'jp2', 'ocr', 'metadata'}
+    invalid_types = set(file_types_list) - valid_types
+    if invalid_types:
+        click.echo(f"❌ Invalid file types: {', '.join(invalid_types)}")
+        click.echo(f"Valid types: {', '.join(sorted(valid_types))}")
+        return
+    
+    downloader = DownloadProcessor(storage, client, download_dir, file_types_list)
     
     # Filter queue items
     all_queue = storage.get_download_queue(status='queued')

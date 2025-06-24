@@ -24,12 +24,17 @@ class DownloadProcessor:
     """Processes download queue and manages file downloads."""
     
     def __init__(self, storage: NewsStorage, api_client: LocApiClient, 
-                 download_dir: str = "./downloads"):
+                 download_dir: str = "./downloads", 
+                 file_types: List[str] = None):
         self.storage = storage
         self.api_client = api_client
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.logger = logging.getLogger(__name__)
+        
+        # Configure which file types to download
+        # Default: download all available types
+        self.file_types = file_types or ['pdf', 'jp2', 'ocr', 'metadata']
         
         # Set up download session with appropriate headers
         self.session = requests.Session()
@@ -198,8 +203,8 @@ class DownloadProcessor:
         # Clean the item_id to make it safe for filenames
         safe_item_id = item_id.replace('/', '_').replace('\\', '_').replace(':', '_')
         
-        # Download PDF if available
-        if page_data.get('pdf_url'):
+        # Download PDF if available and requested
+        if 'pdf' in self.file_types and page_data.get('pdf_url'):
             pdf_result = self._download_file(
                 page_data['pdf_url'],
                 download_path / f"{safe_item_id}.pdf"
@@ -208,8 +213,8 @@ class DownloadProcessor:
                 downloaded_files.append(pdf_result['file_path'])
                 total_size += pdf_result['size_mb']
         
-        # Download JP2 image if available
-        if page_data.get('jp2_url'):
+        # Download JP2 image if available and requested
+        if 'jp2' in self.file_types and page_data.get('jp2_url'):
             jp2_result = self._download_file(
                 page_data['jp2_url'],
                 download_path / f"{safe_item_id}.jp2"
@@ -218,8 +223,8 @@ class DownloadProcessor:
                 downloaded_files.append(jp2_result['file_path'])
                 total_size += jp2_result['size_mb']
         
-        # Save OCR text if available
-        if page_data.get('ocr_text'):
+        # Save OCR text if available and requested
+        if 'ocr' in self.file_types and page_data.get('ocr_text'):
             text_path = download_path / f"{safe_item_id}_ocr.txt"
             try:
                 with open(text_path, 'w', encoding='utf-8') as f:
@@ -228,25 +233,28 @@ class DownloadProcessor:
             except Exception as e:
                 self.logger.warning(f"Failed to save OCR text for {item_id}: {e}")
         
-        # Save metadata
-        metadata_path = download_path / f"{safe_item_id}_metadata.json"
-        try:
-            import json
-            metadata = {
-                'item_id': page_data['item_id'],
-                'lccn': page_data['lccn'],
-                'title': page_data['title'],
-                'date': page_data['date'],
-                'edition': page_data['edition'],
-                'sequence': page_data['sequence'],
-                'page_url': page_data['page_url'],
-                'download_date': datetime.now().isoformat(),
-                'files': downloaded_files
-            }
-            with open(metadata_path, 'w', encoding='utf-8') as f:
-                json.dump(metadata, f, indent=2)
-        except Exception as e:
-            self.logger.warning(f"Failed to save metadata for {item_id}: {e}")
+        # Save metadata if requested
+        if 'metadata' in self.file_types:
+            metadata_path = download_path / f"{safe_item_id}_metadata.json"
+            try:
+                import json
+                metadata = {
+                    'item_id': page_data['item_id'],
+                    'lccn': page_data['lccn'],
+                    'title': page_data['title'],
+                    'date': page_data['date'],
+                    'edition': page_data['edition'],
+                    'sequence': page_data['sequence'],
+                    'page_url': page_data['page_url'],
+                    'download_date': datetime.now().isoformat(),
+                    'files': downloaded_files,
+                    'file_types_requested': self.file_types
+                }
+                with open(metadata_path, 'w', encoding='utf-8') as f:
+                    json.dump(metadata, f, indent=2)
+                downloaded_files.append(str(metadata_path))
+            except Exception as e:
+                self.logger.warning(f"Failed to save metadata for {item_id}: {e}")
         
         if downloaded_files:
             # Mark as downloaded in storage
