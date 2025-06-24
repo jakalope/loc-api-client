@@ -105,8 +105,7 @@ class Config:
     def get_storage_config(self) -> dict:
         """Get storage configuration."""
         return {
-            'db_path': self.database_path,
-            'download_dir': self.download_dir
+            'db_path': self.database_path
         }
 
 

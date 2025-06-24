@@ -143,8 +143,11 @@ class PageInfo:
         # Build URLs from the API data
         page_url = data.get('url', '')
         if not page_url and item_id:
-            # Construct URL from ID
-            page_url = f"https://chroniclingamerica.loc.gov{item_id}"
+            # Construct URL from ID (add slash if item_id doesn't start with one)
+            if item_id.startswith('/'):
+                page_url = f"https://chroniclingamerica.loc.gov{item_id}"
+            else:
+                page_url = f"https://chroniclingamerica.loc.gov/{item_id}"
             
         # PDF URL construction (replace .json with .pdf)
         pdf_url = None

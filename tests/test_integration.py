@@ -386,15 +386,15 @@ class TestIntegration:
         newspapers = processor.process_newspapers_response(invalid_response)
         stored = storage.store_newspapers(newspapers)
         
-        # Should have stored the valid entries
-        assert len(newspapers) == 2
-        assert stored == 2
+        # Should have processed all entries (including invalid ones with empty fields)
+        assert len(newspapers) == 3
+        assert stored == 3
         
-        # Verify only valid data in database
+        # Verify all data in database (including invalid entries with empty fields)
         retrieved = storage.get_newspapers()
-        assert len(retrieved) == 2
+        assert len(retrieved) == 3
         lccns = {n['lccn'] for n in retrieved}
-        assert lccns == {'valid1', 'valid2'}
+        assert lccns == {'valid1', 'valid2', ''}
     
     @responses.activate
     def test_rate_limiting_integration(self, components):

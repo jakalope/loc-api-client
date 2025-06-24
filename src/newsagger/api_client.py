@@ -36,7 +36,7 @@ class LocApiClient:
         for attempt in range(self.max_retries):
             try:
                 time.sleep(self.request_delay)
-                response = self.session.get(url, params=params, timeout=30)
+                response = self.session.get(url, params=params, timeout=60)
                 
                 # Handle rate limiting (429) or CAPTCHA responses
                 if response.status_code == 429:

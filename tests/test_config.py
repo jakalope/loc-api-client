@@ -121,10 +121,9 @@ class TestConfig:
         config = Config()
         storage_config = config.get_storage_config()
         
-        expected_keys = {'db_path', 'download_dir'}
+        expected_keys = {'db_path'}
         assert set(storage_config.keys()) == expected_keys
         assert storage_config['db_path'] == config.database_path
-        assert storage_config['download_dir'] == config.download_dir
     
     @patch('logging.basicConfig')
     def test_setup_logging(self, mock_logging):

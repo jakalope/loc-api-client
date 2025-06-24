@@ -394,3 +394,154 @@ class TestNewsStorage:
             
             assert nested_path.parent.exists()
             assert nested_path.exists()
+    
+    def test_get_search_facet(self, storage):
+        """Test getting a specific search facet by ID."""
+        # Create a test facet
+        facet_id = storage.create_search_facet(
+            'date_range', '1906/1906', 'earthquake', 1000
+        )
+        
+        # Retrieve the facet
+        facet = storage.get_search_facet(facet_id)
+        
+        assert facet is not None
+        assert facet['id'] == facet_id
+        assert facet['facet_type'] == 'date_range'
+        assert facet['facet_value'] == '1906/1906'
+        assert facet['query'] == 'earthquake'
+        assert facet['estimated_items'] == 1000
+        assert facet['status'] == 'pending'
+        
+    def test_get_search_facet_not_found(self, storage):
+        """Test getting a non-existent facet returns None."""
+        facet = storage.get_search_facet(999)
+        assert facet is None
+    
+    def test_get_pages_for_facet(self, storage):
+        """Test getting pages discovered for a facet."""
+        # Store some test pages
+        pages = [
+            PageInfo(
+                item_id='item1',
+                lccn='sn84038012',
+                title='Test Paper 1',
+                date='1906-04-18',
+                edition=1,
+                sequence=1,
+                page_url='https://example.com/item1',
+                pdf_url=None,
+                jp2_url=None,
+                ocr_text=None,
+                word_count=None
+            ),
+            PageInfo(
+                item_id='item2',
+                lccn='sn84038012',
+                title='Test Paper 2',
+                date='1906-04-19',
+                edition=1,
+                sequence=1,
+                page_url='https://example.com/item2',
+                pdf_url=None,
+                jp2_url=None,
+                ocr_text=None,
+                word_count=None
+            )
+        ]
+        
+        storage.store_pages(pages)
+        
+        # Get all pages
+        all_pages = storage.get_pages_for_facet(1)  # facet_id doesn't matter for current implementation
+        assert len(all_pages) == 2
+        
+        # Check structure
+        page = all_pages[0]
+        assert 'item_id' in page
+        assert 'lccn' in page
+        assert 'title' in page
+        assert 'downloaded' in page
+        
+    def test_get_pages_for_facet_downloaded_filter(self, storage):
+        """Test filtering pages by download status."""
+        # Store test pages
+        pages = [
+            PageInfo(
+                item_id='item1',
+                lccn='sn84038012',
+                title='Test Paper 1',
+                date='1906-04-18',
+                edition=1,
+                sequence=1,
+                page_url='https://example.com/item1',
+                pdf_url=None,
+                jp2_url=None,
+                ocr_text=None,
+                word_count=None
+            ),
+            PageInfo(
+                item_id='item2',
+                lccn='sn84038012',
+                title='Test Paper 2',
+                date='1906-04-19',
+                edition=1,
+                sequence=1,
+                page_url='https://example.com/item2',
+                pdf_url=None,
+                jp2_url=None,
+                ocr_text=None,
+                word_count=None
+            )
+        ]
+        
+        storage.store_pages(pages)
+        
+        # Mark one as downloaded
+        storage.mark_page_downloaded('item1')
+        
+        # Get only downloaded pages
+        downloaded_pages = storage.get_pages_for_facet(1, downloaded=True)
+        assert len(downloaded_pages) == 1
+        assert downloaded_pages[0]['item_id'] == 'item1'
+        assert downloaded_pages[0]['downloaded'] is True
+        
+        # Get only non-downloaded pages
+        not_downloaded = storage.get_pages_for_facet(1, downloaded=False)
+        assert len(not_downloaded) == 1
+        assert not_downloaded[0]['item_id'] == 'item2'
+        assert not_downloaded[0]['downloaded'] is False
+    
+    def test_get_download_queue_stats(self, storage):
+        """Test getting download queue statistics."""
+        # Add some test queue items
+        storage.add_to_download_queue('page', 'item1', 1, 10.0, 1.0)
+        storage.add_to_download_queue('page', 'item2', 2, 15.0, 1.5)
+        storage.add_to_download_queue('page', 'item3', 3, 5.0, 0.5)
+        
+        # Update some statuses
+        storage.update_queue_item(1, status='active')
+        storage.update_queue_item(2, status='completed')
+        
+        # Get stats
+        stats = storage.get_download_queue_stats()
+        
+        assert stats['total_items'] == 3
+        assert stats['total_size_mb'] == 30.0
+        assert stats['total_time_hours'] == 3.0
+        assert stats['queued'] == 1  # item3
+        assert stats['active'] == 1  # item1
+        assert stats['completed'] == 1  # item2
+        assert stats['failed'] == 0
+    
+    def test_get_download_queue_stats_empty(self, storage):
+        """Test queue stats when queue is empty."""
+        stats = storage.get_download_queue_stats()
+        
+        assert stats['total_items'] == 0
+        assert stats['total_size_mb'] == 0.0
+        assert stats['total_time_hours'] == 0.0
+        assert stats['queued'] == 0
+        assert stats['active'] == 0
+        assert stats['completed'] == 0
+        assert stats['failed'] == 0

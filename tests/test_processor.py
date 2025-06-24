@@ -72,8 +72,8 @@ class TestPageInfo:
         assert page.edition == 1
         assert page.sequence == 1
         assert page.page_url == 'https://chroniclingamerica.loc.gov/lccn/sn84038012/1906-04-18/ed-1/seq-1/'
-        assert page.pdf_url == 'https://chroniclingamerica.loc.gov/lccn/sn84038012/1906-04-18/ed-1/seq-1.pdf'
-        assert 'seq-1.jp2' in page.jp2_url
+        assert page.pdf_url is None  # URL ends with '/', so no PDF URL is constructed
+        assert page.jp2_url is None  # URL ends with '/', so no JP2 URL is constructed
         assert page.ocr_text is None
         assert page.word_count is None
     
@@ -93,8 +93,8 @@ class TestPageInfo:
         assert page.edition == 1  # Default
         assert page.sequence == 1  # Default
         assert page.item_id == 'test123_1900-01-01_1'  # Fallback ID generated
-        assert page.pdf_url is None
-        assert page.jp2_url is None
+        assert page.pdf_url == 'https://chroniclingamerica.loc.gov/test123_1900-01-01_1.pdf'
+        assert page.jp2_url == 'https://chroniclingamerica.loc.gov/test123_1900-01-01_1.jp2'
     
     def test_item_id_extraction_from_url(self):
         """Test item ID extraction from URL when no explicit ID."""

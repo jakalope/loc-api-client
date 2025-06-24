@@ -13,6 +13,7 @@ from .api_client import LocApiClient
 from .processor import NewsDataProcessor
 from .storage import NewsStorage
 from .discovery import DiscoveryManager
+from .downloader import DownloadProcessor
 
 
 @click.group()
@@ -222,7 +223,7 @@ def search_text(text, date1, date2, limit):
 @cli.command()
 @click.option('--max-papers', default=None, type=int, help='Limit discovery to N newspapers')
 @click.option('--states', help='Comma-separated list of states to prioritize')
-def discover():
+def discover(max_papers, states):
     """Discover and catalog available periodicals from LOC."""
     config = Config()
     client = LocApiClient(**config.get_api_config())
@@ -239,13 +240,13 @@ def discover():
         # Show summary
         periodicals = storage.get_periodicals()
         if periodicals:
-            states = {}
+            state_counts = {}
             for p in periodicals:
                 state = p.get('state', 'Unknown')
-                states[state] = states.get(state, 0) + 1
+                state_counts[state] = state_counts.get(state, 0) + 1
             
             click.echo(f"\n📊 Periodicals by state:")
-            for state, count in sorted(states.items(), key=lambda x: x[1], reverse=True)[:10]:
+            for state, count in sorted(state_counts.items(), key=lambda x: x[1], reverse=True)[:10]:
                 click.echo(f"   {state}: {count}")
         
         # Create facets if states specified
@@ -275,7 +276,7 @@ def create_facets(start_year, end_year, facet_size):
     
     try:
         with tqdm(total=(end_year - start_year + 1)) as pbar:
-            facet_ids = discovery.create_date_range_facets(start_year, end_year, facet_size)
+            facet_ids = discovery.create_date_range_facets(start_year, end_year, facet_size_years=facet_size)
             pbar.update(end_year - start_year + 1)
         
         click.echo(f"✅ Created {len(facet_ids)} date range facets")
@@ -324,6 +325,311 @@ def populate_queue(priority_states, priority_dates):
         
     except Exception as e:
         click.echo(f"❌ Queue population failed: {e}")
+
+
+@cli.command()
+@click.option('--auto-enqueue', is_flag=True, help='Automatically enqueue discovered content')
+@click.option('--batch-size', default=100, help='Items per discovery batch')
+@click.option('--max-items', default=None, type=int, help='Maximum items to discover per facet')
+def auto_discover_facets(auto_enqueue, batch_size, max_items):
+    """Systematically discover content for all pending facets."""
+    config = Config()
+    client = LocApiClient(**config.get_api_config())
+    processor = NewsDataProcessor()
+    storage = NewsStorage(**config.get_storage_config())
+    discovery = DiscoveryManager(client, processor, storage)
+    
+    click.echo("🔍 Starting systematic facet discovery...")
+    
+    try:
+        # Get all pending facets
+        facets = storage.get_search_facets(status='pending')
+        if not facets:
+            click.echo("✅ No pending facets found. Create facets first with 'create-facets' command.")
+            return
+        
+        click.echo(f"📋 Found {len(facets)} pending facets to discover")
+        
+        total_discovered = 0
+        total_enqueued = 0
+        
+        with tqdm(desc="Processing facets", total=len(facets)) as pbar:
+            for facet in facets:
+                pbar.set_description(f"Discovering {facet['facet_type']}: {facet['facet_value']}")
+                
+                # Discover content for this facet
+                discovered_count = discovery.discover_facet_content(
+                    facet['id'], 
+                    batch_size=batch_size,
+                    max_items=max_items
+                )
+                total_discovered += discovered_count
+                
+                # Auto-enqueue if requested
+                if auto_enqueue and discovered_count > 0:
+                    enqueued = discovery.enqueue_facet_content(facet['id'])
+                    total_enqueued += enqueued
+                    pbar.set_postfix(discovered=total_discovered, enqueued=total_enqueued)
+                else:
+                    pbar.set_postfix(discovered=total_discovered)
+                
+                pbar.update(1)
+        
+        click.echo(f"\n✅ Discovery complete!")
+        click.echo(f"   📄 Total items discovered: {total_discovered:,}")
+        if auto_enqueue:
+            click.echo(f"   ⬇️ Total items enqueued: {total_enqueued:,}")
+        
+        # Show updated stats
+        stats = storage.get_discovery_stats()
+        click.echo(f"\n📊 Updated Stats:")
+        click.echo(f"   Completed facets: {stats['completed_facets']}/{stats['total_facets']}")
+        click.echo(f"   Total discovered items: {stats['discovered_items']:,}")
+        
+        if not auto_enqueue and total_discovered > 0:
+            click.echo(f"\n💡 Run 'newsagger auto-enqueue' to queue discovered content for download.")
+            
+    except Exception as e:
+        click.echo(f"❌ Auto-discovery failed: {e}")
+
+
+@cli.command()
+@click.option('--year', type=int, help='Specific year to test (e.g. 1906)')
+@click.option('--state', help='Specific state to test (e.g. California)')
+@click.option('--max-items', default=20, type=int, help='Maximum items to discover')
+def test_discovery(year, state, max_items):
+    """Test discovery with a small, focused dataset."""
+    config = Config()
+    client = LocApiClient(**config.get_api_config())
+    processor = NewsDataProcessor()
+    storage = NewsStorage(**config.get_storage_config())
+    discovery = DiscoveryManager(client, processor, storage)
+    
+    if year:
+        click.echo(f"🔍 Testing discovery for year {year} (max {max_items} items)...")
+        
+        # Create a temporary facet for testing
+        facet_id = storage.create_search_facet(
+            'date_range', f'{year}/{year}', '', max_items
+        )
+        
+        try:
+            discovered = discovery.discover_facet_content(facet_id, max_items=max_items, batch_size=20)
+            click.echo(f"✅ Successfully discovered {discovered} items for {year}")
+            
+            # Show sample of what was found
+            if discovered > 0:
+                pages = storage.get_pages_for_facet(facet_id)[:5]
+                click.echo(f"\n📄 Sample pages found:")
+                for page in pages:
+                    click.echo(f"   • {page['title']} - {page['date']}")
+                    
+        except Exception as e:
+            click.echo(f"❌ Test discovery failed: {e}")
+    
+    elif state:
+        click.echo(f"🔍 Testing discovery for {state} newspapers (max {max_items} items)...")
+        
+        # First, check how many periodicals we have for this state
+        periodicals = storage.get_periodicals(state=state)
+        if not periodicals:
+            click.echo(f"⚠️ No periodicals found for state '{state}'")
+            return
+        
+        click.echo(f"📰 Found {len(periodicals)} periodicals in {state}")
+        
+        # Create a temporary facet for testing
+        facet_id = storage.create_search_facet(
+            'state', state, '', max_items
+        )
+        
+        try:
+            discovered = discovery.discover_facet_content(facet_id, max_items=max_items, batch_size=10)
+            click.echo(f"✅ Successfully discovered {discovered} items for {state}")
+            
+        except Exception as e:
+            click.echo(f"❌ Test discovery failed: {e}")
+    
+    else:
+        click.echo("❌ Please specify either --year or --state for testing")
+
+
+@cli.command()
+@click.option('--priority-facets', help='Only enqueue specific facet IDs (comma-separated)')
+@click.option('--max-size-gb', default=None, type=float, help='Maximum total queue size in GB')
+@click.option('--dry-run', is_flag=True, help='Show what would be enqueued without actually doing it')
+def auto_enqueue(priority_facets, max_size_gb, dry_run):
+    """Automatically enqueue all discovered content for download."""
+    config = Config()
+    storage = NewsStorage(**config.get_storage_config())
+    discovery = DiscoveryManager(None, None, storage)
+    
+    action = "Would enqueue" if dry_run else "Enqueuing"
+    click.echo(f"⬇️ {action} discovered content...")
+    
+    try:
+        # Get facets with discovered content
+        if priority_facets:
+            facet_ids = [int(fid.strip()) for fid in priority_facets.split(',')]
+            facets = [storage.get_search_facet(fid) for fid in facet_ids]
+            facets = [f for f in facets if f]  # Remove None values
+        else:
+            facets = storage.get_search_facets(status=['completed', 'discovering'])
+            facets = [f for f in facets if f['items_discovered'] > 0]
+        
+        if not facets:
+            click.echo("✅ No facets with discovered content found.")
+            return
+        
+        click.echo(f"📋 Found {len(facets)} facets with discovered content")
+        
+        total_items = 0
+        total_size_mb = 0
+        items_by_facet = {}
+        
+        # Calculate what would be enqueued
+        for facet in facets:
+            if max_size_gb and (total_size_mb / 1024) >= max_size_gb:
+                click.echo(f"⚠️ Reached size limit of {max_size_gb} GB")
+                break
+                
+            discovered = facet['items_discovered'] - facet.get('items_downloaded', 0)
+            if discovered > 0:
+                # Estimate size (rough estimate: 1MB per item average)
+                estimated_size = discovered * 1.0  # MB
+                if max_size_gb and (total_size_mb + estimated_size) / 1024 > max_size_gb:
+                    # Partial enqueue to stay under limit
+                    remaining_mb = (max_size_gb * 1024) - total_size_mb
+                    discovered = int(remaining_mb / 1.0)
+                    estimated_size = remaining_mb
+                
+                items_by_facet[facet['id']] = {
+                    'items': discovered,
+                    'size_mb': estimated_size,
+                    'facet': facet
+                }
+                total_items += discovered
+                total_size_mb += estimated_size
+        
+        if dry_run:
+            click.echo(f"\n📊 Would enqueue {total_items:,} items ({total_size_mb/1024:.1f} GB):")
+            for facet_id, info in items_by_facet.items():
+                facet = info['facet']
+                click.echo(f"   📄 {facet['facet_type']}: {facet['facet_value']}")
+                click.echo(f"      {info['items']:,} items, {info['size_mb']/1024:.1f} GB")
+            return
+        
+        # Actually enqueue the content
+        enqueued_total = 0
+        with tqdm(desc="Enqueuing content", total=len(items_by_facet)) as pbar:
+            for facet_id, info in items_by_facet.items():
+                facet = info['facet']
+                pbar.set_description(f"Enqueuing {facet['facet_type']}: {facet['facet_value']}")
+                
+                enqueued = discovery.enqueue_facet_content(
+                    facet_id,
+                    max_items=info['items']
+                )
+                enqueued_total += enqueued
+                pbar.update(1)
+        
+        click.echo(f"\n✅ Enqueuing complete!")
+        click.echo(f"   ⬇️ Total items enqueued: {enqueued_total:,}")
+        click.echo(f"   💾 Estimated total size: {total_size_mb/1024:.1f} GB")
+        
+        # Show queue stats
+        queue_stats = storage.get_download_queue_stats()
+        click.echo(f"\n📊 Download Queue:")
+        click.echo(f"   Queued items: {queue_stats.get('queued', 0):,}")
+        click.echo(f"   Total estimated size: {queue_stats.get('total_size_mb', 0)/1024:.1f} GB")
+        
+        click.echo(f"\n💡 Run 'newsagger show-queue' to see queued downloads.")
+        
+    except Exception as e:
+        click.echo(f"❌ Auto-enqueue failed: {e}")
+
+
+@cli.command()
+@click.option('--start-year', default=1900, type=int, help='Start year')
+@click.option('--end-year', default=1920, type=int, help='End year')
+@click.option('--states', help='Comma-separated states to focus on')
+@click.option('--auto-discover', is_flag=True, help='Automatically discover content after creating facets')
+@click.option('--auto-enqueue', is_flag=True, help='Automatically enqueue discovered content')
+@click.option('--max-size-gb', default=10.0, type=float, help='Maximum download queue size in GB')
+def setup_download_workflow(start_year, end_year, states, auto_discover, auto_enqueue, max_size_gb):
+    """Set up complete automated download workflow from scratch."""
+    config = Config()
+    client = LocApiClient(**config.get_api_config())
+    processor = NewsDataProcessor()
+    storage = NewsStorage(**config.get_storage_config())
+    discovery = DiscoveryManager(client, processor, storage)
+    
+    click.echo("🚀 Setting up automated download workflow...")
+    click.echo(f"   📅 Years: {start_year} - {end_year}")
+    if states:
+        click.echo(f"   🗺️ States: {states}")
+    click.echo(f"   💾 Max queue size: {max_size_gb} GB")
+    
+    try:
+        # Step 1: Discover periodicals if needed
+        periodicals = storage.get_periodicals()
+        if not periodicals:
+            click.echo("\n🔍 Step 1: Discovering periodicals...")
+            discovered_count = discovery.discover_all_periodicals()
+            click.echo(f"✅ Discovered {discovered_count} periodicals")
+        else:
+            click.echo(f"\n✅ Step 1: Using existing {len(periodicals)} periodicals")
+        
+        # Step 2: Create facets
+        click.echo(f"\n📅 Step 2: Creating date facets...")
+        facet_ids = discovery.create_date_range_facets(start_year, end_year, facet_size_years=1)
+        click.echo(f"✅ Created {len(facet_ids)} date facets")
+        
+        if states:
+            click.echo(f"\n🗺️ Step 2b: Creating state facets...")
+            state_list = [s.strip() for s in states.split(',')]
+            state_facet_ids = discovery.create_state_facets(state_list)
+            click.echo(f"✅ Created {len(state_facet_ids)} state facets")
+            facet_ids.extend(state_facet_ids)
+        
+        if auto_discover:
+            # Step 3: Auto-discover content
+            click.echo(f"\n🔍 Step 3: Auto-discovering content...")
+            # Get all pending facets and discover their content
+            facets = storage.get_search_facets(status='pending')
+            total_discovered = 0
+            with tqdm(desc="Auto-discovering", total=len(facets)) as pbar:
+                for facet in facets:
+                    discovered = discovery.discover_facet_content(facet['id'], batch_size=100)
+                    total_discovered += discovered
+                    pbar.update(1)
+            click.echo(f"✅ Auto-discovered {total_discovered:,} items")
+            
+        if auto_enqueue:
+            # Step 4: Auto-enqueue content
+            click.echo(f"\n⬇️ Step 4: Auto-enqueuing content...")
+            facets = storage.get_search_facets(status=['completed', 'discovering'])
+            facets = [f for f in facets if f['items_discovered'] > 0]
+            total_enqueued = 0
+            with tqdm(desc="Auto-enqueuing", total=len(facets)) as pbar:
+                for facet in facets:
+                    enqueued = discovery.enqueue_facet_content(facet['id'])
+                    total_enqueued += enqueued
+                    pbar.update(1)
+            click.echo(f"✅ Auto-enqueued {total_enqueued:,} items")
+        
+        click.echo(f"\n🎉 Workflow setup complete!")
+        click.echo(f"💡 Next steps:")
+        if not auto_discover:
+            click.echo(f"   - Run 'newsagger auto-discover-facets --auto-enqueue' to discover and queue content")
+        elif not auto_enqueue:
+            click.echo(f"   - Run 'newsagger auto-enqueue' to queue discovered content")
+        else:
+            click.echo(f"   - Run 'newsagger show-queue' to see your download queue")
+            click.echo(f"   - Implement actual download logic to process the queue")
+        
+    except Exception as e:
+        click.echo(f"❌ Workflow setup failed: {e}")
 
 
 @cli.command()
@@ -474,6 +780,242 @@ def show_queue(status, limit):
         
     except Exception as e:
         click.echo(f"❌ Failed to show queue: {e}")
+
+
+# ===== DOWNLOAD PROCESSING COMMANDS =====
+
+@cli.command()
+@click.option('--max-items', default=None, type=int, help='Maximum items to download')
+@click.option('--max-size-mb', default=None, type=float, help='Maximum total download size in MB')
+@click.option('--download-dir', default='./downloads', help='Directory to store downloaded files')
+@click.option('--dry-run', is_flag=True, help='Show what would be downloaded without actually doing it')
+def process_downloads(max_items, max_size_mb, download_dir, dry_run):
+    """Process the download queue and download files."""
+    config = Config()
+    storage = NewsStorage(**config.get_storage_config())
+    client = LocApiClient(**config.get_api_config())
+    downloader = DownloadProcessor(storage, client, download_dir)
+    
+    action = "Would process" if dry_run else "Processing"
+    click.echo(f"📥 {action} download queue...")
+    if max_items:
+        click.echo(f"   📊 Max items: {max_items}")
+    if max_size_mb:
+        click.echo(f"   💾 Max size: {max_size_mb} MB")
+    click.echo(f"   📁 Download directory: {download_dir}")
+    
+    try:
+        stats = downloader.process_queue(
+            max_items=max_items,
+            max_size_mb=max_size_mb,
+            dry_run=dry_run
+        )
+        
+        if dry_run:
+            click.echo(f"\n📊 Dry Run Results:")
+            click.echo(f"   Would download: {stats.get('would_download', 0)} items")
+            click.echo(f"   Estimated size: {stats.get('estimated_size_mb', 0):.1f} MB")
+        else:
+            click.echo(f"\n✅ Download processing complete!")
+            click.echo(f"   📥 Downloaded: {stats['downloaded']} items")
+            click.echo(f"   ❌ Errors: {stats['errors']}")
+            click.echo(f"   ⏭️ Skipped: {stats['skipped']}")
+            click.echo(f"   💾 Total size: {stats['total_size_mb']:.1f} MB")
+            if 'duration_minutes' in stats:
+                click.echo(f"   ⏱️ Duration: {stats['duration_minutes']:.1f} minutes")
+            
+            # Show updated queue stats
+            queue_stats = storage.get_download_queue_stats()
+            click.echo(f"\n📊 Queue Status:")
+            click.echo(f"   Queued: {queue_stats.get('queued', 0)}")
+            click.echo(f"   Completed: {queue_stats.get('completed', 0)}")
+            click.echo(f"   Failed: {queue_stats.get('failed', 0)}")
+        
+    except Exception as e:
+        click.echo(f"❌ Download processing failed: {e}")
+
+
+@cli.command()
+@click.argument('item_id')
+@click.option('--download-dir', default='./downloads', help='Directory to store downloaded files')
+def download_page(item_id, download_dir):
+    """Download a specific page by item ID."""
+    config = Config()
+    storage = NewsStorage(**config.get_storage_config())
+    client = LocApiClient(**config.get_api_config())
+    downloader = DownloadProcessor(storage, client, download_dir)
+    
+    click.echo(f"📥 Downloading page {item_id}...")
+    
+    try:
+        result = downloader._download_page(item_id)
+        
+        if result['success']:
+            if result.get('skipped'):
+                click.echo(f"⏭️ Page already downloaded")
+            else:
+                click.echo(f"✅ Downloaded {len(result.get('files', []))} files")
+                click.echo(f"   💾 Size: {result.get('size_mb', 0):.1f} MB")
+                click.echo(f"   📁 Files: {', '.join(result.get('files', []))}")
+        else:
+            click.echo(f"❌ Download failed: {result.get('error', 'Unknown error')}")
+    
+    except Exception as e:
+        click.echo(f"❌ Download failed: {e}")
+
+
+@cli.command()
+def resume_downloads():
+    """Resume failed downloads by resetting them to queued status."""
+    config = Config()
+    storage = NewsStorage(**config.get_storage_config())
+    client = LocApiClient(**config.get_api_config())
+    downloader = DownloadProcessor(storage, client)
+    
+    click.echo("🔄 Resuming failed downloads...")
+    
+    try:
+        result = downloader.resume_failed_downloads()
+        
+        if result['resumed'] > 0:
+            click.echo(f"✅ Reset {result['resumed']} failed downloads to queued status")
+            click.echo(f"💡 Run 'newsagger process-downloads' to retry them")
+        else:
+            click.echo("✅ No failed downloads to resume")
+    
+    except Exception as e:
+        click.echo(f"❌ Failed to resume downloads: {e}")
+
+
+@cli.command()
+@click.option('--download-dir', default='./downloads', help='Directory to check')
+def download_stats(download_dir):
+    """Show comprehensive download statistics."""
+    config = Config()
+    storage = NewsStorage(**config.get_storage_config())
+    client = LocApiClient(**config.get_api_config())
+    downloader = DownloadProcessor(storage, client, download_dir=download_dir)
+    
+    try:
+        stats = downloader.get_download_stats()
+        
+        click.echo("📊 Download Statistics:")
+        
+        # Queue stats
+        queue_stats = stats['queue_stats']
+        click.echo(f"\n⬇️ Download Queue:")
+        click.echo(f"   Total items: {queue_stats.get('total_items', 0)}")
+        click.echo(f"   Queued: {queue_stats.get('queued', 0)}")
+        click.echo(f"   Active: {queue_stats.get('active', 0)}")
+        click.echo(f"   Completed: {queue_stats.get('completed', 0)}")
+        click.echo(f"   Failed: {queue_stats.get('failed', 0)}")
+        click.echo(f"   Total estimated size: {queue_stats.get('total_size_mb', 0)/1024:.1f} GB")
+        
+        # Storage stats
+        storage_stats = stats['storage_stats']
+        click.echo(f"\n💾 Database:")
+        click.echo(f"   Total pages: {storage_stats.get('total_pages', 0):,}")
+        click.echo(f"   Downloaded pages: {storage_stats.get('downloaded_pages', 0):,}")
+        if storage_stats.get('total_pages', 0) > 0:
+            download_pct = (storage_stats.get('downloaded_pages', 0) / storage_stats.get('total_pages', 1)) * 100
+            click.echo(f"   Download progress: {download_pct:.1f}%")
+        
+        # Disk usage
+        click.echo(f"\n💿 Local Storage:")
+        click.echo(f"   Download directory: {stats['download_directory']}")
+        click.echo(f"   Files on disk: {stats['files_on_disk']:,}")
+        click.echo(f"   Disk usage: {stats['disk_usage_mb']:.1f} MB ({stats['disk_usage_mb']/1024:.2f} GB)")
+        
+    except Exception as e:
+        click.echo(f"❌ Failed to get download stats: {e}")
+
+
+@cli.command()
+@click.option('--download-dir', default='./downloads', help='Directory to clean')
+def cleanup_downloads(download_dir):
+    """Clean up incomplete or corrupted download files."""
+    config = Config()
+    storage = NewsStorage(**config.get_storage_config())
+    client = LocApiClient(**config.get_api_config())
+    downloader = DownloadProcessor(storage, client, download_dir=download_dir)
+    
+    click.echo("🧹 Cleaning up incomplete downloads...")
+    
+    try:
+        result = downloader.cleanup_incomplete_downloads()
+        
+        if result['cleaned_files'] > 0:
+            click.echo(f"✅ Cleaned up {result['cleaned_files']} files")
+            click.echo(f"   💾 Freed space: {result['freed_space_mb']:.1f} MB")
+        else:
+            click.echo("✅ No cleanup needed - all files appear complete")
+    
+    except Exception as e:
+        click.echo(f"❌ Cleanup failed: {e}")
+
+
+@cli.command()
+@click.option('--priority', default=None, type=int, help='Only download items with this priority')
+@click.option('--queue-type', help='Only download items of this type (page, facet, periodical)')
+@click.option('--max-items', default=10, type=int, help='Maximum items to download')
+@click.option('--download-dir', default='./downloads', help='Directory to store files')
+def download_priority(priority, queue_type, max_items, download_dir):
+    """Download items from queue with specific priority or type."""
+    config = Config()
+    storage = NewsStorage(**config.get_storage_config())
+    client = LocApiClient(**config.get_api_config())
+    downloader = DownloadProcessor(storage, client, download_dir)
+    
+    # Filter queue items
+    all_queue = storage.get_download_queue(status='queued')
+    filtered_queue = []
+    
+    for item in all_queue:
+        if priority is not None and item['priority'] != priority:
+            continue
+        if queue_type and item['queue_type'] != queue_type:
+            continue
+        filtered_queue.append(item)
+    
+    if not filtered_queue:
+        click.echo("No matching items found in queue")
+        return
+    
+    # Limit items
+    filtered_queue = filtered_queue[:max_items]
+    
+    filter_desc = []
+    if priority is not None:
+        filter_desc.append(f"priority {priority}")
+    if queue_type:
+        filter_desc.append(f"type {queue_type}")
+    
+    filter_str = " and ".join(filter_desc) if filter_desc else "all criteria"
+    click.echo(f"📥 Downloading {len(filtered_queue)} items matching {filter_str}...")
+    
+    try:
+        # Temporarily modify queue to only include filtered items
+        # Mark others as paused temporarily
+        paused_items = []
+        for item in all_queue:
+            if item not in filtered_queue and item['status'] == 'queued':
+                storage.update_queue_item(item['id'], status='paused')
+                paused_items.append(item['id'])
+        
+        # Process the filtered downloads
+        stats = downloader.process_queue(max_items=len(filtered_queue))
+        
+        # Restore paused items
+        for item_id in paused_items:
+            storage.update_queue_item(item_id, status='queued')
+        
+        click.echo(f"\n✅ Priority download complete!")
+        click.echo(f"   📥 Downloaded: {stats['downloaded']} items")
+        click.echo(f"   ❌ Errors: {stats['errors']}")
+        click.echo(f"   💾 Total size: {stats['total_size_mb']:.1f} MB")
+        
+    except Exception as e:
+        click.echo(f"❌ Priority download failed: {e}")
 
 
 if __name__ == '__main__':

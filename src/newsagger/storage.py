@@ -488,7 +488,7 @@ class NewsStorage:
                 """, (facet_type, facet_value, facet_query))
                 return cursor.fetchone()[0]
     
-    def get_search_facets(self, facet_type: str = None, status: str = None) -> List[Dict]:
+    def get_search_facets(self, facet_type: str = None, status = None) -> List[Dict]:
         """Get search facets with optional filtering."""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -502,8 +502,15 @@ class NewsStorage:
                 params.append(facet_type)
             
             if status:
-                conditions.append("status = ?")
-                params.append(status)
+                if isinstance(status, list):
+                    # Handle list of statuses with IN clause
+                    placeholders = ','.join(['?' for _ in status])
+                    conditions.append(f"status IN ({placeholders})")
+                    params.extend(status)
+                else:
+                    # Handle single status
+                    conditions.append("status = ?")
+                    params.append(status)
             
             if conditions:
                 query += " WHERE " + " AND ".join(conditions)
@@ -817,5 +824,109 @@ class NewsStorage:
                 'completed_queue_items': row[3] or 0,
                 'avg_queue_progress': round(row[4] or 0, 2)
             })
+            
+            return stats
+    
+    def get_search_facet(self, facet_id: int) -> Optional[Dict]:
+        """Get a specific search facet by ID."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, facet_type, facet_value, facet_query, estimated_items,
+                       actual_items, items_discovered, items_downloaded,
+                       status, error_message, created_at, updated_at
+                FROM search_facets 
+                WHERE id = ?
+            """, (facet_id,))
+            
+            row = cursor.fetchone()
+            if not row:
+                return None
+                
+            return {
+                'id': row[0],
+                'facet_type': row[1],
+                'facet_value': row[2],
+                'query': row[3],
+                'estimated_items': row[4],
+                'actual_items': row[5],
+                'items_discovered': row[6],
+                'items_downloaded': row[7],
+                'status': row[8],
+                'error_message': row[9],
+                'created_at': row[10],
+                'updated_at': row[11]
+            }
+    
+    def get_pages_for_facet(self, facet_id: int, downloaded: bool = None) -> List[Dict]:
+        """Get pages discovered for a specific facet."""
+        # For now, this is a simple implementation
+        # In a real system, you'd want to track which facet discovered which pages
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            if downloaded is None:
+                cursor.execute("""
+                    SELECT item_id, lccn, title, date, edition, sequence,
+                           page_url, pdf_url, jp2_url, downloaded
+                    FROM pages
+                    ORDER BY date, lccn, edition, sequence
+                """)
+            else:
+                cursor.execute("""
+                    SELECT item_id, lccn, title, date, edition, sequence,
+                           page_url, pdf_url, jp2_url, downloaded
+                    FROM pages
+                    WHERE downloaded = ?
+                    ORDER BY date, lccn, edition, sequence
+                """, (downloaded,))
+            
+            rows = cursor.fetchall()
+            return [
+                {
+                    'item_id': row[0],
+                    'lccn': row[1],
+                    'title': row[2],
+                    'date': row[3],
+                    'edition': row[4],
+                    'sequence': row[5],
+                    'page_url': row[6],
+                    'pdf_url': row[7],
+                    'jp2_url': row[8],
+                    'downloaded': bool(row[9])
+                }
+                for row in rows
+            ]
+    
+    def get_download_queue_stats(self) -> Dict:
+        """Get statistics about the download queue."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            
+            # Get counts by status
+            cursor.execute("""
+                SELECT status, COUNT(*), 
+                       SUM(estimated_size_mb), 
+                       SUM(estimated_time_hours)
+                FROM download_queue 
+                GROUP BY status
+            """)
+            
+            stats = {
+                'total_items': 0,
+                'total_size_mb': 0.0,
+                'total_time_hours': 0.0,
+                'queued': 0,
+                'active': 0,
+                'completed': 0,
+                'failed': 0
+            }
+            
+            for row in cursor.fetchall():
+                status, count, size_mb, time_hours = row
+                stats['total_items'] += count
+                stats['total_size_mb'] += size_mb or 0
+                stats['total_time_hours'] += time_hours or 0
+                stats[status] = count
             
             return stats

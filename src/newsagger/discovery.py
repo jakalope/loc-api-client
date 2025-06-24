@@ -278,6 +278,196 @@ class DiscoveryManager:
         
         return summary
     
+    def discover_facet_content(self, facet_id: int, batch_size: int = 100, max_items: int = None) -> int:
+        """
+        Systematically discover all content for a specific facet.
+        Returns the number of items discovered.
+        """
+        facet = self.storage.get_search_facet(facet_id)
+        if not facet:
+            raise ValueError(f"Facet {facet_id} not found")
+        
+        self.logger.info(f"Discovering content for facet {facet_id}: {facet['facet_type']} = {facet['facet_value']}")
+        
+        # Update facet status to discovering
+        self.storage.update_facet_discovery(facet_id, status='discovering')
+        
+        total_discovered = 0
+        page = 1
+        
+        # Adjust batch size for different facet types
+        if facet['facet_type'] == 'state':
+            # Use smaller batches for state searches to avoid timeouts
+            batch_size = min(batch_size, 50)
+            self.logger.info(f"Using smaller batch size ({batch_size}) for state facet to avoid timeouts")
+        
+        try:
+            while True:
+                # Build search query based on facet type
+                search_params = {
+                    'page': page,
+                    'rows': batch_size
+                }
+                
+                if facet['facet_type'] == 'date_range':
+                    # Parse date range like "1906/1906"
+                    start_date, end_date = facet['facet_value'].split('/')
+                    search_params['date1'] = start_date
+                    search_params['date2'] = end_date
+                    search_params['dates_facet'] = f"{start_date}/{end_date}"
+                elif facet['facet_type'] == 'state':
+                    # For state facets, we'll use a more targeted approach:
+                    # 1. Get periodicals from that state first
+                    # 2. Then search by specific newspapers rather than broad state search
+                    state_periodicals = self.storage.get_periodicals(state=facet['facet_value'])
+                    if not state_periodicals:
+                        self.logger.warning(f"No periodicals found for state {facet['facet_value']}")
+                        break
+                    
+                    # Use the first few LCCNs from the state for more focused search
+                    # This prevents massive result sets that timeout
+                    sample_lccns = [p['lccn'] for p in state_periodicals[:5]]  # Limit to 5 newspapers
+                    if sample_lccns:
+                        # Search for content from these specific newspapers
+                        search_params['andtext'] = f"lccn:({' OR '.join(sample_lccns)})"
+                    else:
+                        # Fallback to a simpler state-based search
+                        search_params['andtext'] = facet['facet_value']
+                elif facet['query']:
+                    search_params['andtext'] = facet['query']
+                
+                # Perform search
+                response = self.api_client.search_pages(**search_params)
+                pages = self.processor.process_search_response(response, deduplicate=True)
+                
+                if not pages:
+                    break
+                
+                # Apply max_items limit before storing
+                if max_items and total_discovered + len(pages) > max_items:
+                    remaining = max_items - total_discovered
+                    pages = pages[:remaining]
+                    self.logger.info(f"Limiting to {remaining} items to stay under max_items ({max_items}) for facet {facet_id}")
+                
+                # Store discovered pages
+                stored_count = self.storage.store_pages(pages)
+                total_discovered += stored_count
+                
+                # Update facet progress
+                self.storage.update_facet_discovery(
+                    facet_id, 
+                    items_discovered=total_discovered
+                )
+                
+                self.logger.debug(f"Discovered {stored_count} items on page {page} for facet {facet_id}")
+                
+                # Check if we've reached the limit
+                if max_items and total_discovered >= max_items:
+                    self.logger.info(f"Reached max items limit ({max_items}) for facet {facet_id}")
+                    break
+                
+                if len(pages) < batch_size:
+                    # Last page
+                    break
+                
+                page += 1
+            
+            # Mark facet as completed
+            self.storage.update_facet_discovery(
+                facet_id, 
+                actual_items=total_discovered,
+                items_discovered=total_discovered,
+                status='completed'
+            )
+            
+            self.logger.info(f"Completed discovery for facet {facet_id}: {total_discovered} items")
+            return total_discovered
+            
+        except Exception as e:
+            error_message = str(e)
+            
+            # Handle timeout errors more gracefully
+            if 'timeout' in error_message.lower():
+                self.logger.warning(f"Timeout discovering content for facet {facet_id}. Consider using smaller batches or more specific searches.")
+                # Mark as partial completion if we discovered some items
+                if total_discovered > 0:
+                    self.storage.update_facet_discovery(
+                        facet_id,
+                        actual_items=total_discovered,
+                        items_discovered=total_discovered,
+                        status='completed',
+                        error_message=f"Completed with timeouts: {error_message}"
+                    )
+                    self.logger.info(f"Marked facet {facet_id} as completed with {total_discovered} items despite timeouts")
+                    return total_discovered
+                else:
+                    self.storage.update_facet_discovery(
+                        facet_id,
+                        status='error',
+                        error_message=f"Timeout before discovering any items: {error_message}"
+                    )
+            else:
+                self.logger.error(f"Error discovering content for facet {facet_id}: {e}")
+                self.storage.update_facet_discovery(
+                    facet_id,
+                    status='error',
+                    error_message=error_message
+                )
+            raise
+    
+    def enqueue_facet_content(self, facet_id: int, max_items: int = None) -> int:
+        """
+        Enqueue all discovered content from a facet for download.
+        Returns the number of items enqueued.
+        """
+        facet = self.storage.get_search_facet(facet_id)
+        if not facet:
+            raise ValueError(f"Facet {facet_id} not found")
+        
+        # Get all pages discovered for this facet that aren't already downloaded
+        pages = self.storage.get_pages_for_facet(facet_id, downloaded=False)
+        
+        if max_items:
+            pages = pages[:max_items]
+        
+        enqueued_count = 0
+        for page in pages:
+            # Estimate download size and time
+            estimated_size_mb = 1.0  # Rough estimate: 1MB per page
+            estimated_time_hours = 0.1  # Rough estimate: 0.1 hours per page
+            
+            # Add to download queue
+            self.storage.add_to_download_queue(
+                queue_type='page',
+                reference_id=page['item_id'],
+                priority=self._calculate_priority(facet, page),
+                estimated_size_mb=estimated_size_mb,
+                estimated_time_hours=estimated_time_hours
+            )
+            enqueued_count += 1
+        
+        self.logger.info(f"Enqueued {enqueued_count} items from facet {facet_id}")
+        return enqueued_count
+    
+    def _calculate_priority(self, facet: Dict, page: Dict) -> int:
+        """Calculate download priority for a page based on facet and page metadata."""
+        priority = 5  # Default priority
+        
+        # Higher priority for certain date ranges
+        if facet['facet_type'] == 'date_range':
+            year_range = facet['facet_value']
+            if '1906' in year_range:  # San Francisco earthquake
+                priority = 1
+            elif any(year in year_range for year in ['1917', '1918', '1919']):  # WWI era
+                priority = 2
+        
+        # Higher priority for certain states
+        if facet['facet_type'] == 'state':
+            if facet['facet_value'] in ['California', 'New York', 'Illinois']:
+                priority = max(1, priority - 1)
+        
+        return priority
+    
     # Helper methods
     
     def _extract_city(self, place_list: List[str]) -> Optional[str]:
