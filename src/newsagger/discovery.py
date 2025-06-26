@@ -124,7 +124,7 @@ class DiscoveryManager:
                                estimate_items: bool = False,
                                rate_limit_delay: float = None) -> List[int]:
         """
-        Create date range facets for systematic downloading.
+        Create date range facets for systematic downloading with resumption support.
         
         Args:
             start_year: Starting year for facets
@@ -133,54 +133,99 @@ class DiscoveryManager:
             estimate_items: Whether to estimate items per facet (makes API calls)
             rate_limit_delay: Extra delay between estimations to avoid rate limiting
             
-        Returns list of facet IDs created.
+        Returns list of facet IDs created (only new ones, not existing).
         """
+        # Check for existing facets to enable resumption
+        existing_facets = self.storage.get_search_facets(facet_type='date_range')
+        existing_ranges = {f['facet_value'] for f in existing_facets}
+        
         facet_ids = []
-        total_facets = len(range(start_year, end_year + 1, facet_size_years))
+        all_years = list(range(start_year, end_year + 1, facet_size_years))
+        total_facets = len(all_years)
+        created_count = 0
+        skipped_count = 0
         
         if estimate_items:
-            self.logger.warning(f"Will make {total_facets} API calls for estimation - this may trigger rate limiting!")
-            if rate_limit_delay is None:
-                rate_limit_delay = 5.0  # Extra 5 seconds between calls
-        
-        for i, year in enumerate(range(start_year, end_year + 1, facet_size_years)):
-            facet_end_year = min(year + facet_size_years - 1, end_year)
-            facet_value = f"{year}/{facet_end_year}" if year != facet_end_year else f"{year}/{year}"
+            # Count how many new facets would need estimation
+            new_facets_count = 0
+            for year in all_years:
+                facet_end_year = min(year + facet_size_years - 1, end_year)
+                facet_value = f"{year}/{facet_end_year}" if year != facet_end_year else f"{year}/{year}"
+                if facet_value not in existing_ranges:
+                    new_facets_count += 1
             
-            # Estimate items for this date range (optional)
-            estimated_items = 0
-            if estimate_items:
+            if new_facets_count > 0:
+                self.logger.warning(f"Will make {new_facets_count} API calls for estimation - this may trigger rate limiting!")
+                if rate_limit_delay is None:
+                    rate_limit_delay = 5.0  # Extra 5 seconds between calls
+        
+        # Use tqdm for progress tracking
+        from tqdm import tqdm
+        
+        self.logger.info(f"Creating date facets from {start_year} to {end_year} (resuming if interrupted)")
+        
+        with tqdm(total=total_facets, desc="Creating facets") as pbar:
+            for i, year in enumerate(all_years):
+                facet_end_year = min(year + facet_size_years - 1, end_year)
+                facet_value = f"{year}/{facet_end_year}" if year != facet_end_year else f"{year}/{year}"
+                
+                # Skip if facet already exists (resumption support)
+                if facet_value in existing_ranges:
+                    skipped_count += 1
+                    pbar.set_description(f"Skipping {facet_value} (exists)")
+                    pbar.update(1)
+                    continue
+                
+                pbar.set_description(f"Creating {facet_value}")
+                
+                # Estimate items for this date range (optional)
+                estimated_items = 0
+                if estimate_items:
+                    try:
+                        estimate = self.api_client.estimate_download_size((str(year), str(facet_end_year)))
+                        estimated_items = estimate.get('total_pages', 0)
+                        
+                        # Add extra delay to avoid rate limiting
+                        if rate_limit_delay and created_count < (total_facets - skipped_count - 1):
+                            import time
+                            time.sleep(rate_limit_delay)
+                            
+                    except Exception as e:
+                        self.logger.warning(f"Failed to estimate items for {facet_value}: {e}")
+                        estimated_items = 0
+                
+                # Create and immediately save the facet
                 try:
-                    self.logger.info(f"Estimating items for {facet_value} ({i+1}/{total_facets})...")
-                    estimate = self.api_client.estimate_download_size((str(year), str(facet_end_year)))
-                    estimated_items = estimate.get('total_pages', 0)
+                    facet_id = self.storage.create_search_facet(
+                        facet_type='date_range',
+                        facet_value=facet_value,
+                        facet_query='',  # Empty query for broad date search
+                        estimated_items=estimated_items
+                    )
+                    facet_ids.append(facet_id)
+                    created_count += 1
                     
-                    # Add extra delay to avoid rate limiting
-                    if rate_limit_delay and i < total_facets - 1:  # Don't delay after last item
-                        self.logger.debug(f"Waiting {rate_limit_delay} seconds to avoid rate limiting...")
-                        import time
-                        time.sleep(rate_limit_delay)
+                    if estimate_items:
+                        pbar.set_postfix(items=f"{estimated_items:,}", created=created_count)
+                    else:
+                        pbar.set_postfix(created=created_count, skipped=skipped_count)
                         
                 except Exception as e:
-                    self.logger.warning(f"Failed to estimate items for {facet_value}: {e}")
-                    estimated_items = 0
-            
-            facet_id = self.storage.create_search_facet(
-                facet_type='date_range',
-                facet_value=facet_value,
-                facet_query='',  # Empty query for broad date search
-                estimated_items=estimated_items
-            )
-            facet_ids.append(facet_id)
-            
-            if estimate_items:
-                self.logger.info(f"Created date facet {facet_value} with ~{estimated_items:,} estimated items")
-            else:
-                self.logger.info(f"Created date facet {facet_value} (estimation skipped)")
+                    self.logger.error(f"Failed to create facet {facet_value}: {e}")
+                    # Continue with next facet rather than failing entirely
+                
+                pbar.update(1)
         
-        if not estimate_items:
-            self.logger.info(f"Created {len(facet_ids)} facets without estimation to avoid rate limiting")
-            self.logger.info("Use 'auto-discover-facets' later to get actual item counts")
+        # Summary logging
+        if created_count > 0:
+            if estimate_items:
+                self.logger.info(f"Created {created_count} new date facets with estimation")
+            else:
+                self.logger.info(f"Created {created_count} new date facets (estimation skipped to avoid rate limiting)")
+                self.logger.info("Use 'estimate-facets' or 'auto-discover-facets' later to get item counts")
+        
+        if skipped_count > 0:
+            self.logger.info(f"Skipped {skipped_count} existing facets (resumption)")
         
         return facet_ids
     

@@ -267,7 +267,11 @@ def discover(max_papers, states):
 @click.option('--estimate-items', is_flag=True, help='Estimate items per facet (makes API calls, may trigger rate limiting)')
 @click.option('--rate-limit-delay', default=5.0, type=float, help='Extra delay between API calls (seconds)')
 def create_facets(start_year, end_year, facet_size, estimate_items, rate_limit_delay):
-    """Create date range facets for systematic downloading."""
+    """Create date range facets for systematic downloading.
+    
+    Progress is saved automatically - you can safely interrupt (Ctrl+C) and resume later.
+    Use 'check-facet-progress' to see current status for a date range.
+    """
     config = Config()
     client = LocApiClient(**config.get_api_config())
     processor = NewsDataProcessor()
@@ -284,7 +288,29 @@ def create_facets(start_year, end_year, facet_size, estimate_items, rate_limit_d
             click.echo("Cancelled. Use without --estimate-items to skip estimation.")
             return
     
-    click.echo(f"📅 Creating {total_facets} date facets from {start_year} to {end_year} ({facet_size} year(s) each)...")
+    # Check for existing facets to enable resumption
+    existing_facets = storage.get_search_facets(facet_type='date_range')
+    existing_ranges = {f['facet_value'] for f in existing_facets}
+    
+    # Calculate which facets need to be created
+    all_ranges = []
+    for year in range(start_year, end_year + 1, facet_size):
+        facet_end_year = min(year + facet_size - 1, end_year)
+        facet_value = f"{year}/{facet_end_year}" if year != facet_end_year else f"{year}/{year}"
+        all_ranges.append(facet_value)
+    
+    missing_ranges = [r for r in all_ranges if r not in existing_ranges]
+    
+    if existing_ranges:
+        click.echo(f"🔄 Found {len(existing_ranges)} existing facets, {len(missing_ranges)} to create")
+        if missing_ranges:
+            click.echo(f"   Will create: {missing_ranges[0]} to {missing_ranges[-1]}")
+        else:
+            click.echo("✅ All facets already exist!")
+            return
+    
+    click.echo(f"📅 Creating {len(missing_ranges)} date facets from {start_year} to {end_year} ({facet_size} year(s) each)...")
+    click.echo("💡 Tip: Press Ctrl+C to safely interrupt - progress is saved automatically")
     
     try:
         facet_ids = discovery.create_date_range_facets(
@@ -295,22 +321,177 @@ def create_facets(start_year, end_year, facet_size, estimate_items, rate_limit_d
             rate_limit_delay=rate_limit_delay if estimate_items else None
         )
         
-        click.echo(f"✅ Created {len(facet_ids)} date range facets")
+        click.echo(f"✅ Created {len(facet_ids)} new date range facets")
+        if len(facet_ids) > 0:
+            click.echo(f"📊 Total facets now: {len(existing_ranges) + len(facet_ids)}")
+        else:
+            click.echo("📊 No new facets created (all already existed)")
+            
+    except KeyboardInterrupt:
+        click.echo(f"\n⚠️  Interrupted by user")
+        # Check how many were created before interruption
+        current_facets = storage.get_search_facets(facet_type='date_range')
+        current_ranges = {f['facet_value'] for f in current_facets}
+        newly_created = len(current_ranges) - len(existing_ranges)
         
-        # Show created facets
+        if newly_created > 0:
+            click.echo(f"✅ Saved {newly_created} facets before interruption")
+            click.echo(f"📊 Progress: {len(current_ranges)}/{len(all_ranges)} facets created")
+            click.echo("🔄 Run the same command again to resume from where you left off")
+        else:
+            click.echo("❌ No facets were created before interruption")
+        return
+        
+    except Exception as e:
+        click.echo(f"❌ Facet creation failed: {e}")
+        return
+    
+    # Show sample of created facets
+    if len(facet_ids) > 0:
         facets = storage.get_search_facets(facet_type='date_range')
-        click.echo(f"\n📋 Created facets:")
-        for facet in facets[-len(facet_ids):]:  # Show just the newly created ones
+        recent_facets = [f for f in facets if f['id'] in facet_ids]
+        
+        click.echo(f"\n📋 Sample of newly created facets:")
+        for facet in recent_facets[:5]:  # Show first 5
             if estimate_items:
                 click.echo(f"   📅 {facet['facet_value']}: ~{facet['estimated_items']:,} items")
             else:
                 click.echo(f"   📅 {facet['facet_value']}: (estimation skipped)")
         
-        if not estimate_items:
-            click.echo(f"\n💡 Tip: Use 'newsagger auto-discover-facets' to get actual item counts")
+        if len(recent_facets) > 5:
+            click.echo(f"   ... and {len(recent_facets)-5} more")
         
-    except Exception as e:
-        click.echo(f"❌ Facet creation failed: {e}")
+        if not estimate_items:
+            click.echo(f"\n💡 Tip: Use 'newsagger estimate-facets' to get item estimates later")
+
+
+@cli.command()
+@click.option('--start-year', default=1900, type=int, help='Start year to check progress for')
+@click.option('--end-year', default=1920, type=int, help='End year to check progress for')
+@click.option('--facet-size', default=1, type=int, help='Years per facet')
+def check_facet_progress(start_year, end_year, facet_size):
+    """Check progress of facet creation for a date range."""
+    config = Config()
+    storage = NewsStorage(**config.get_storage_config())
+    
+    # Calculate expected facets
+    all_ranges = []
+    for year in range(start_year, end_year + 1, facet_size):
+        facet_end_year = min(year + facet_size - 1, end_year)
+        facet_value = f"{year}/{facet_end_year}" if year != facet_end_year else f"{year}/{year}"
+        all_ranges.append(facet_value)
+    
+    # Check existing facets
+    existing_facets = storage.get_search_facets(facet_type='date_range')
+    existing_ranges = {f['facet_value'] for f in existing_facets}
+    
+    # Calculate progress
+    completed_ranges = [r for r in all_ranges if r in existing_ranges]
+    missing_ranges = [r for r in all_ranges if r not in existing_ranges]
+    
+    progress_percent = (len(completed_ranges) / len(all_ranges)) * 100
+    
+    click.echo(f"📊 Facet Creation Progress ({start_year}-{end_year})")
+    click.echo(f"   Total expected: {len(all_ranges)} facets")
+    click.echo(f"   Created: {len(completed_ranges)} facets ({progress_percent:.1f}%)")
+    click.echo(f"   Missing: {len(missing_ranges)} facets")
+    
+    if missing_ranges:
+        click.echo(f"\n❌ Missing ranges:")
+        # Group consecutive ranges for cleaner display
+        groups = []
+        current_group = [missing_ranges[0]]
+        
+        for i in range(1, len(missing_ranges)):
+            current_year = int(missing_ranges[i].split('/')[0])
+            prev_year = int(missing_ranges[i-1].split('/')[0])
+            
+            if current_year == prev_year + facet_size:
+                current_group.append(missing_ranges[i])
+            else:
+                groups.append(current_group)
+                current_group = [missing_ranges[i]]
+        groups.append(current_group)
+        
+        for group in groups:
+            if len(group) == 1:
+                click.echo(f"   📅 {group[0]}")
+            else:
+                click.echo(f"   📅 {group[0]} to {group[-1]} ({len(group)} facets)")
+        
+        click.echo(f"\n🔄 Run 'newsagger create-facets {start_year} {end_year}' to resume")
+    else:
+        click.echo(f"\n✅ All facets created for {start_year}-{end_year}")
+
+
+@cli.command()
+def status():
+    """Show overall progress status of all operations."""
+    config = Config()
+    storage = NewsStorage(**config.get_storage_config())
+    
+    click.echo("📊 Newsagger Status Overview")
+    
+    # Get basic storage stats
+    storage_stats = storage.get_storage_stats()
+    discovery_stats = storage.get_discovery_stats()
+    
+    click.echo(f"\n📚 Storage:")
+    click.echo(f"   Newspapers: {storage_stats['total_newspapers']:,}")
+    click.echo(f"   Pages discovered: {storage_stats['total_pages']:,}")
+    click.echo(f"   Pages downloaded: {storage_stats['downloaded_pages']:,}")
+    click.echo(f"   Database size: {storage_stats['db_size_mb']} MB")
+    
+    # Periodicals discovery
+    click.echo(f"\n🏛️ Periodicals:")
+    click.echo(f"   Total: {discovery_stats['total_periodicals']:,}")
+    click.echo(f"   Discovery complete: {discovery_stats['discovered_periodicals']:,}")
+    click.echo(f"   Download complete: {discovery_stats['downloaded_periodicals']:,}")
+    
+    # Facets status
+    click.echo(f"\n📅 Search Facets:")
+    click.echo(f"   Total: {discovery_stats['total_facets']:,}")
+    click.echo(f"   Completed: {discovery_stats['completed_facets']:,}")
+    click.echo(f"   Errors: {discovery_stats['error_facets']:,}")
+    
+    # Estimate accuracy
+    if discovery_stats['total_facets'] > 0:
+        estimated_items = discovery_stats.get('estimated_items', 0)
+        actual_items = discovery_stats.get('actual_items', 0)
+        if estimated_items > 0 and actual_items > 0:
+            accuracy = (actual_items / estimated_items) * 100
+            click.echo(f"   Estimate accuracy: {accuracy:.1f}% ({actual_items:,}/{estimated_items:,})")
+    
+    # Download queue
+    click.echo(f"\n📥 Download Queue:")
+    click.echo(f"   Total items: {discovery_stats['total_queue_items']:,}")
+    click.echo(f"   Queued: {discovery_stats['queued_items']:,}")
+    click.echo(f"   Active: {discovery_stats['active_items']:,}")
+    click.echo(f"   Completed: {discovery_stats['completed_queue_items']:,}")
+    
+    # Quick recommendations
+    click.echo(f"\n💡 Quick Actions:")
+    
+    if discovery_stats['total_facets'] == 0:
+        click.echo("   • Run 'newsagger create-facets' to create date facets")
+    elif discovery_stats['completed_facets'] == 0:
+        click.echo("   • Run 'newsagger auto-discover-facets' to discover content")
+    elif discovery_stats['queued_items'] == 0:
+        click.echo("   • Run 'newsagger auto-enqueue' to queue content for download")
+    elif discovery_stats['queued_items'] > 0:
+        click.echo("   • Run 'newsagger process-downloads' to start downloading")
+    
+    # Show current year range of facets if any exist
+    facets = storage.get_search_facets(facet_type='date_range')
+    if facets:
+        years = []
+        for facet in facets:
+            start_year = facet['facet_value'].split('/')[0]
+            years.append(int(start_year))
+        if years:
+            min_year, max_year = min(years), max(years)
+            click.echo(f"   • Current facet range: {min_year}-{max_year}")
+            click.echo(f"   • Use 'newsagger check-facet-progress {min_year} {max_year}' for details")
 
 
 @cli.command()
@@ -743,7 +924,10 @@ def auto_enqueue(priority_facets, max_size_gb, dry_run):
 @click.option('--auto-enqueue', is_flag=True, help='Automatically enqueue discovered content')
 @click.option('--max-size-gb', default=10.0, type=float, help='Maximum download queue size in GB')
 def setup_download_workflow(start_year, end_year, states, auto_discover, auto_enqueue, max_size_gb):
-    """Set up complete automated download workflow from scratch."""
+    """Set up complete automated download workflow from scratch.
+    
+    All progress is saved automatically - you can safely interrupt and resume.
+    """
     config = Config()
     client = LocApiClient(**config.get_api_config())
     processor = NewsDataProcessor()
@@ -755,6 +939,7 @@ def setup_download_workflow(start_year, end_year, states, auto_discover, auto_en
     if states:
         click.echo(f"   🗺️ States: {states}")
     click.echo(f"   💾 Max queue size: {max_size_gb} GB")
+    click.echo("💡 Tip: Progress is saved automatically - you can safely interrupt (Ctrl+C) and resume")
     
     try:
         # Step 1: Discover periodicals if needed
