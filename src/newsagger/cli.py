@@ -264,7 +264,9 @@ def discover(max_papers, states):
 @click.option('--start-year', default=1900, type=int, help='Start year for facets')
 @click.option('--end-year', default=1920, type=int, help='End year for facets') 
 @click.option('--facet-size', default=1, type=int, help='Years per facet')
-def create_facets(start_year, end_year, facet_size):
+@click.option('--estimate-items', is_flag=True, help='Estimate items per facet (makes API calls, may trigger rate limiting)')
+@click.option('--rate-limit-delay', default=5.0, type=float, help='Extra delay between API calls (seconds)')
+def create_facets(start_year, end_year, facet_size, estimate_items, rate_limit_delay):
     """Create date range facets for systematic downloading."""
     config = Config()
     client = LocApiClient(**config.get_api_config())
@@ -272,12 +274,26 @@ def create_facets(start_year, end_year, facet_size):
     storage = NewsStorage(**config.get_storage_config())
     discovery = DiscoveryManager(client, processor, storage)
     
-    click.echo(f"📅 Creating date facets from {start_year} to {end_year} ({facet_size} year(s) each)...")
+    total_facets = len(range(start_year, end_year + 1, facet_size))
+    
+    if estimate_items:
+        click.echo(f"⚠️  WARNING: Will make {total_facets} API calls for estimation")
+        click.echo(f"   This may trigger rate limiting (1 hour timeout)")
+        click.echo(f"   Using {rate_limit_delay}s delay between calls")
+        if not click.confirm("Continue with estimation?"):
+            click.echo("Cancelled. Use without --estimate-items to skip estimation.")
+            return
+    
+    click.echo(f"📅 Creating {total_facets} date facets from {start_year} to {end_year} ({facet_size} year(s) each)...")
     
     try:
-        with tqdm(total=(end_year - start_year + 1)) as pbar:
-            facet_ids = discovery.create_date_range_facets(start_year, end_year, facet_size_years=facet_size)
-            pbar.update(end_year - start_year + 1)
+        facet_ids = discovery.create_date_range_facets(
+            start_year, 
+            end_year, 
+            facet_size_years=facet_size,
+            estimate_items=estimate_items,
+            rate_limit_delay=rate_limit_delay if estimate_items else None
+        )
         
         click.echo(f"✅ Created {len(facet_ids)} date range facets")
         
@@ -285,10 +301,180 @@ def create_facets(start_year, end_year, facet_size):
         facets = storage.get_search_facets(facet_type='date_range')
         click.echo(f"\n📋 Created facets:")
         for facet in facets[-len(facet_ids):]:  # Show just the newly created ones
-            click.echo(f"   📅 {facet['facet_value']}: ~{facet['estimated_items']:,} items")
+            if estimate_items:
+                click.echo(f"   📅 {facet['facet_value']}: ~{facet['estimated_items']:,} items")
+            else:
+                click.echo(f"   📅 {facet['facet_value']}: (estimation skipped)")
+        
+        if not estimate_items:
+            click.echo(f"\n💡 Tip: Use 'newsagger auto-discover-facets' to get actual item counts")
         
     except Exception as e:
         click.echo(f"❌ Facet creation failed: {e}")
+
+
+@cli.command()
+@click.option('--facet-type', default='date_range', help='Type of facets to estimate (date_range, state)')
+@click.option('--rate-limit-delay', default=8.0, type=float, help='Delay between API calls (seconds)')
+@click.option('--max-facets', default=None, type=int, help='Maximum number of facets to estimate')
+@click.option('--force-reestimate', is_flag=True, help='Re-estimate facets that already have estimates')
+def estimate_facets(facet_type, rate_limit_delay, max_facets, force_reestimate):
+    """Estimate item counts for existing facets that don't have estimates."""
+    config = Config()
+    client = LocApiClient(**config.get_api_config())
+    storage = NewsStorage(**config.get_storage_config())
+    
+    # Get facets without estimates or force re-estimation
+    all_facets = storage.get_search_facets(facet_type=facet_type)
+    if force_reestimate:
+        facets_to_estimate = all_facets
+    else:
+        facets_to_estimate = [f for f in all_facets if f['estimated_items'] == 0]
+    
+    if not facets_to_estimate:
+        if force_reestimate:
+            click.echo(f"✅ No {facet_type} facets found")
+        else:
+            click.echo(f"✅ All {facet_type} facets already have estimates")
+            click.echo("   Use --force-reestimate to update existing estimates")
+        return
+    
+    if max_facets:
+        facets_to_estimate = facets_to_estimate[:max_facets]
+    
+    total_calls = len(facets_to_estimate)
+    estimated_time = (total_calls * rate_limit_delay) / 60
+    
+    if force_reestimate:
+        click.echo(f"📊 Re-estimating {total_calls} {facet_type} facets")
+    else:
+        click.echo(f"📊 Found {total_calls} {facet_type} facets without estimates")
+    click.echo(f"⚠️  This will make {total_calls} API calls over ~{estimated_time:.1f} minutes")
+    click.echo(f"   Using {rate_limit_delay}s delay between calls to avoid rate limiting")
+    
+    if not click.confirm("Continue with estimation?"):
+        click.echo("Cancelled.")
+        return
+    
+    try:
+        with tqdm(total=total_calls, desc="Estimating facets") as pbar:
+            for i, facet in enumerate(facets_to_estimate):
+                pbar.set_description(f"Estimating {facet['facet_value']}")
+                
+                try:
+                    if facet_type == 'date_range':
+                        start_year, end_year = facet['facet_value'].split('/')
+                        estimate = client.estimate_download_size((start_year, end_year))
+                        estimated_items = estimate.get('total_pages', 0)
+                    else:
+                        # For other facet types, do a sample search
+                        sample = client.search_pages(andtext=facet['facet_value'], rows=1)
+                        estimated_items = sample.get('totalItems', 0)
+                    
+                    # Update the facet with the new estimate
+                    # We need to update the estimated_items field in the database directly
+                    # since update_facet_discovery doesn't have an estimated_items parameter
+                    import sqlite3
+                    with sqlite3.connect(storage.db_path) as conn:
+                        conn.execute("""
+                            UPDATE search_facets 
+                            SET estimated_items = ?, updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                        """, (estimated_items, facet['id']))
+                        conn.commit()
+                    
+                    pbar.set_postfix(items=f"{estimated_items:,}")
+                    
+                    # Rate limiting delay
+                    if i < total_calls - 1:  # Don't delay after last item
+                        import time
+                        time.sleep(rate_limit_delay)
+                
+                except Exception as e:
+                    click.echo(f"\n⚠️ Failed to estimate {facet['facet_value']}: {e}")
+                
+                pbar.update(1)
+        
+        click.echo(f"\n✅ Estimation complete for {total_calls} facets")
+        
+    except Exception as e:
+        click.echo(f"❌ Estimation failed: {e}")
+
+
+@cli.command()
+def fix_wildly_inaccurate_estimates():
+    """Fix facets with wildly inaccurate estimates (21M+ items) using improved estimation."""
+    config = Config()
+    client = LocApiClient(**config.get_api_config())
+    storage = NewsStorage(**config.get_storage_config())
+    
+    # Find facets with obviously wrong estimates (anything over 1 million is likely wrong)
+    all_facets = storage.get_search_facets()
+    bad_estimates = [f for f in all_facets if f['estimated_items'] > 1000000]
+    
+    if not bad_estimates:
+        click.echo("✅ No facets with wildly inaccurate estimates found")
+        return
+    
+    click.echo(f"🔍 Found {len(bad_estimates)} facets with inaccurate estimates (>1M items)")
+    click.echo("These likely have the old broken estimate of ~21M items")
+    
+    # Show examples
+    for facet in bad_estimates[:5]:
+        click.echo(f"   📅 {facet['facet_value']}: {facet['estimated_items']:,} items")
+    if len(bad_estimates) > 5:
+        click.echo(f"   ... and {len(bad_estimates)-5} more")
+    
+    estimated_time = (len(bad_estimates) * 8) / 60  # 8 seconds per estimate
+    click.echo(f"\n⚠️  This will make {len(bad_estimates)} API calls over ~{estimated_time:.1f} minutes")
+    click.echo("   Using 8s delay between calls to avoid rate limiting")
+    
+    if not click.confirm("Fix these estimates?"):
+        click.echo("Cancelled.")
+        return
+    
+    try:
+        import sqlite3
+        import time
+        
+        with tqdm(total=len(bad_estimates), desc="Fixing estimates") as pbar:
+            for i, facet in enumerate(bad_estimates):
+                pbar.set_description(f"Fixing {facet['facet_value']}")
+                
+                try:
+                    if facet['facet_type'] == 'date_range':
+                        start_year, end_year = facet['facet_value'].split('/')
+                        estimate = client.estimate_download_size((start_year, end_year))
+                        new_estimate = estimate.get('total_pages', 0)
+                    else:
+                        # For other facet types, use basic sampling
+                        new_estimate = 1000  # Conservative default for state facets
+                    
+                    # Update the estimate directly
+                    with sqlite3.connect(storage.db_path) as conn:
+                        conn.execute("""
+                            UPDATE search_facets 
+                            SET estimated_items = ?, updated_at = CURRENT_TIMESTAMP
+                            WHERE id = ?
+                        """, (new_estimate, facet['id']))
+                        conn.commit()
+                    
+                    pbar.set_postfix(items=f"{new_estimate:,}")
+                    
+                    # Rate limiting delay  
+                    if i < len(bad_estimates) - 1:
+                        time.sleep(8.0)
+                
+                except Exception as e:
+                    click.echo(f"\n⚠️ Failed to fix {facet['facet_value']}: {e}")
+                
+                pbar.update(1)
+        
+        click.echo(f"\n✅ Fixed estimates for {len(bad_estimates)} facets")
+        click.echo("   Estimates should now be realistic (hundreds to low thousands)")
+        
+    except Exception as e:
+        click.echo(f"❌ Fix failed: {e}")
 
 
 @cli.command()
@@ -580,10 +766,12 @@ def setup_download_workflow(start_year, end_year, states, auto_discover, auto_en
         else:
             click.echo(f"\n✅ Step 1: Using existing {len(periodicals)} periodicals")
         
-        # Step 2: Create facets
+        # Step 2: Create facets (without estimation to avoid rate limiting)
         click.echo(f"\n📅 Step 2: Creating date facets...")
-        facet_ids = discovery.create_date_range_facets(start_year, end_year, facet_size_years=1)
-        click.echo(f"✅ Created {len(facet_ids)} date facets")
+        facet_ids = discovery.create_date_range_facets(
+            start_year, end_year, facet_size_years=1, estimate_items=False
+        )
+        click.echo(f"✅ Created {len(facet_ids)} date facets (estimation skipped to avoid rate limiting)")
         
         if states:
             click.echo(f"\n🗺️ Step 2b: Creating state facets...")
@@ -908,6 +1096,29 @@ def resume_downloads():
     
     except Exception as e:
         click.echo(f"❌ Failed to resume downloads: {e}")
+
+
+@cli.command()
+def reset_stuck_downloads():
+    """Reset stuck active downloads back to queued status."""
+    config = Config()
+    storage = NewsStorage(**config.get_storage_config())
+    client = LocApiClient(**config.get_api_config())
+    downloader = DownloadProcessor(storage, client)
+    
+    click.echo("🔧 Resetting stuck downloads...")
+    
+    try:
+        result = downloader.reset_stuck_downloads()
+        
+        if result['reset'] > 0:
+            click.echo(f"✅ Reset {result['reset']} stuck downloads to queued status")
+            click.echo(f"💡 Run 'newsagger process-downloads' to retry them")
+        else:
+            click.echo("✅ No stuck downloads to reset")
+    
+    except Exception as e:
+        click.echo(f"❌ Failed to reset stuck downloads: {e}")
 
 
 @cli.command()

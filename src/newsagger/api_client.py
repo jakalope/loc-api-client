@@ -197,12 +197,56 @@ class LocApiClient:
                 yield newspaper
     
     def estimate_download_size(self, date_range: tuple, newspaper_lccn: Optional[str] = None) -> Dict:
-        """Estimate the total size and time for a download operation."""
+        """Estimate the total size and time for a download operation using accurate sampling."""
         date1, date2 = date_range
         
-        # Sample search to estimate total pages
-        sample = self.search_pages(date1=date1, date2=date2, rows=1)
-        total_results = sample.get('totalItems', 0)
+        # Use dates facet for more accurate filtering
+        search_params = {
+            'date1': date1,
+            'date2': date2,
+            'dates_facet': f"{date1}/{date2}",
+            'rows': 100  # Sample size for estimation
+        }
+        
+        # Get a sample to estimate total results more accurately
+        sample = self.search_pages(**search_params)
+        sample_results = sample.get('results', [])
+        
+        if not sample_results:
+            # No results found for this date range
+            return {
+                'total_pages': 0,
+                'estimated_size_gb': 0,
+                'estimated_time_hours': 0,
+                'date_range': f"{date1}-{date2}",
+                'newspaper_lccn': newspaper_lccn
+            }
+        
+        # Check if we got fewer results than requested (indicates total < sample size)
+        if len(sample_results) < 100:
+            total_results = len(sample_results)
+        else:
+            # Try to get a better estimate by checking a few more pages
+            # This is more API-efficient than the broken totalItems field
+            total_results = len(sample_results)
+            
+            # Sample a few more pages to estimate total
+            for page in [2, 3]:
+                try:
+                    next_sample = self.search_pages(page=page, **search_params)
+                    next_results = next_sample.get('results', [])
+                    if not next_results:
+                        break
+                    total_results += len(next_results)
+                    if len(next_results) < 100:
+                        break
+                except:
+                    break
+            
+            # If we got 300 results, estimate there might be more
+            if total_results >= 300:
+                # Conservative estimate: assume 500-2000 results for a single year
+                total_results = min(total_results * 3, 2000)
         
         # Rough estimates based on typical newspaper page sizes
         avg_page_size_mb = 2.5  # Average size per page including images/text

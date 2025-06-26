@@ -432,6 +432,26 @@ class DownloadProcessor:
         
         return {"resumed": len(failed_items)}
     
+    def reset_stuck_downloads(self) -> Dict:
+        """Reset stuck active downloads back to queued status."""
+        active_items = self.storage.get_download_queue(status='active')
+        if not active_items:
+            self.logger.info("No stuck downloads to reset")
+            return {"reset": 0}
+        
+        self.logger.info(f"Resetting {len(active_items)} stuck active downloads...")
+        
+        # Reset active items to queued status
+        for item in active_items:
+            self.storage.update_queue_item(
+                item['id'],
+                status='queued',
+                error_message=None,
+                progress_percent=0
+            )
+        
+        return {"reset": len(active_items)}
+    
     def get_download_stats(self) -> Dict:
         """Get comprehensive download statistics."""
         queue_stats = self.storage.get_download_queue_stats()
