@@ -369,7 +369,9 @@ class DiscoveryManager:
         self.logger.info(f"Discovering content for facet {facet_id}: {facet['facet_type']} = {facet['facet_value']}")
         
         # Update facet status to discovering
+        self.logger.debug(f"Setting facet {facet_id} status to discovering")
         self.storage.update_facet_discovery(facet_id, status='discovering')
+        self.logger.debug(f"Facet {facet_id} status updated")
         
         total_discovered = 0
         page = 1
@@ -415,12 +417,36 @@ class DiscoveryManager:
                 elif facet['query']:
                     search_params['andtext'] = facet['query']
                 
-                # Perform search
-                response = self.api_client.search_pages(**search_params)
-                pages = self.processor.process_search_response(response, deduplicate=True)
-                
-                if not pages:
-                    break
+                # Perform search with timeout handling
+                try:
+                    self.logger.debug(f"Searching facet {facet_id} page {page} with params: {search_params}")
+                    self.logger.debug(f"About to call search_pages for facet {facet_id}")
+                    response = self.api_client.search_pages(**search_params)
+                    self.logger.debug(f"Got API response for facet {facet_id}, processing...")
+                    pages = self.processor.process_search_response(response, deduplicate=True)
+                    self.logger.debug(f"Processed response for facet {facet_id}, got {len(pages)} pages")
+                    
+                    if not pages:
+                        self.logger.debug(f"No results on page {page} for facet {facet_id}, ending discovery")
+                        break
+                        
+                    self.logger.debug(f"Found {len(pages)} pages on page {page} for facet {facet_id}")
+                    
+                except Exception as e:
+                    self.logger.warning(f"Search failed for facet {facet_id} page {page}: {e}")
+                    
+                    # For certain errors, we should stop rather than continue
+                    if 'timeout' in str(e).lower() or 'connection' in str(e).lower():
+                        self.logger.warning(f"Network issue on facet {facet_id}, stopping discovery")
+                        break
+                    elif page == 1:
+                        # If first page fails, this facet might be problematic
+                        self.logger.error(f"First page failed for facet {facet_id}, marking as error")
+                        raise
+                    else:
+                        # If later pages fail, we can still save what we found
+                        self.logger.warning(f"Page {page} failed for facet {facet_id}, stopping at page {page-1}")
+                        break
                 
                 # Apply max_items limit before storing
                 if max_items and total_discovered + len(pages) > max_items:
@@ -429,7 +455,9 @@ class DiscoveryManager:
                     self.logger.info(f"Limiting to {remaining} items to stay under max_items ({max_items}) for facet {facet_id}")
                 
                 # Store discovered pages
+                self.logger.debug(f"About to store {len(pages)} pages for facet {facet_id}")
                 stored_count = self.storage.store_pages(pages)
+                self.logger.debug(f"Stored {stored_count} pages for facet {facet_id}")
                 total_discovered += stored_count
                 
                 # Update facet progress

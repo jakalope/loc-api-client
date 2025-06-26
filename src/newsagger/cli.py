@@ -698,8 +698,15 @@ def populate_queue(priority_states, priority_dates):
 @click.option('--auto-enqueue', is_flag=True, help='Automatically enqueue discovered content')
 @click.option('--batch-size', default=100, help='Items per discovery batch')
 @click.option('--max-items', default=None, type=int, help='Maximum items to discover per facet')
-def auto_discover_facets(auto_enqueue, batch_size, max_items):
-    """Systematically discover content for all pending facets."""
+@click.option('--skip-errors', is_flag=True, help='Skip facets that encounter errors and continue')
+@click.option('--timeout-seconds', default=300, type=int, help='Timeout per facet in seconds')
+def auto_discover_facets(auto_enqueue, batch_size, max_items, skip_errors, timeout_seconds):
+    """Systematically discover content for all pending facets.
+    
+    IMPORTANT: This makes many API calls and may hit rate limits (20 req/min).
+    Use smaller --batch-size (20-50) to reduce API calls per facet.
+    If rate limited, wait ~1 hour before retrying.
+    """
     config = Config()
     client = LocApiClient(**config.get_api_config())
     processor = NewsDataProcessor()
@@ -708,37 +715,106 @@ def auto_discover_facets(auto_enqueue, batch_size, max_items):
     
     click.echo("🔍 Starting systematic facet discovery...")
     
-    try:
-        # Get all pending facets
-        facets = storage.get_search_facets(status='pending')
-        if not facets:
-            click.echo("✅ No pending facets found. Create facets first with 'create-facets' command.")
+    # Calculate estimated API calls and warn about rate limiting
+    facets = storage.get_search_facets(status='pending')
+    if not facets:
+        click.echo("✅ No pending facets found. Create facets first with 'create-facets' command.")
+        return
+    
+    estimated_api_calls = len(facets) * (max_items // batch_size + 1) if max_items else len(facets) * 10
+    estimated_minutes = estimated_api_calls / 20  # 20 requests per minute limit
+    
+    click.echo(f"📋 Found {len(facets)} pending facets to discover")
+    click.echo(f"⚠️  Estimated {estimated_api_calls} API calls (~{estimated_minutes:.1f} minutes at 20 req/min)")
+    click.echo(f"💡 Using batch size {batch_size} - smaller sizes reduce rate limiting risk")
+    
+    if estimated_minutes > 30:
+        click.echo(f"⚠️  WARNING: This will take >30 minutes and may hit rate limits!")
+        click.echo(f"   Consider using --max-items=100 to limit discovery per facet")
+        if not click.confirm("Continue anyway?"):
+            click.echo("Cancelled")
             return
-        
-        click.echo(f"📋 Found {len(facets)} pending facets to discover")
+    
+    try:
         
         total_discovered = 0
         total_enqueued = 0
         
-        with tqdm(desc="Processing facets", total=len(facets)) as pbar:
-            for facet in facets:
+        errors_count = 0
+        skipped_facets = []
+        
+        with tqdm(desc="Auto-discovering", total=len(facets)) as pbar:
+            for i, facet in enumerate(facets):
                 pbar.set_description(f"Discovering {facet['facet_type']}: {facet['facet_value']}")
                 
-                # Discover content for this facet
-                discovered_count = discovery.discover_facet_content(
-                    facet['id'], 
-                    batch_size=batch_size,
-                    max_items=max_items
-                )
-                total_discovered += discovered_count
+                try:
+                    # Add timeout handling using signal (for Unix systems)
+                    import signal
+                    
+                    def timeout_handler(signum, frame):
+                        raise TimeoutError(f"Facet {facet['id']} discovery timed out after {timeout_seconds} seconds")
+                    
+                    # Set up timeout for this facet
+                    if hasattr(signal, 'SIGALRM'):  # Unix systems only
+                        signal.signal(signal.SIGALRM, timeout_handler)
+                        signal.alarm(timeout_seconds)
+                    
+                    # Discover content for this facet
+                    discovered_count = discovery.discover_facet_content(
+                        facet['id'], 
+                        batch_size=batch_size,
+                        max_items=max_items
+                    )
+                    
+                    # Cancel the timeout
+                    if hasattr(signal, 'SIGALRM'):
+                        signal.alarm(0)
+                    
+                    total_discovered += discovered_count
+                    
+                    # Auto-enqueue if requested
+                    if auto_enqueue and discovered_count > 0:
+                        enqueued = discovery.enqueue_facet_content(facet['id'])
+                        total_enqueued += enqueued
+                        pbar.set_postfix(discovered=total_discovered, enqueued=total_enqueued, errors=errors_count)
+                    else:
+                        pbar.set_postfix(discovered=total_discovered, errors=errors_count)
                 
-                # Auto-enqueue if requested
-                if auto_enqueue and discovered_count > 0:
-                    enqueued = discovery.enqueue_facet_content(facet['id'])
-                    total_enqueued += enqueued
-                    pbar.set_postfix(discovered=total_discovered, enqueued=total_enqueued)
-                else:
-                    pbar.set_postfix(discovered=total_discovered)
+                except (TimeoutError, Exception) as e:
+                    # Cancel the timeout
+                    if hasattr(signal, 'SIGALRM'):
+                        signal.alarm(0)
+                    
+                    errors_count += 1
+                    error_msg = str(e)
+                    skipped_facets.append(f"{facet['facet_value']}: {error_msg}")
+                    
+                    # Check for rate limiting specifically
+                    if "Rate limited" in error_msg or "429" in error_msg:
+                        click.echo(f"\n🛑 RATE LIMITED by LoC API!")
+                        click.echo(f"   The API allows only 20 requests per minute")
+                        click.echo(f"   You must wait ~1 hour before trying again")
+                        click.echo(f"   Progress saved: {total_discovered:,} items discovered so far")
+                        click.echo(f"\n💡 Next time, try:")
+                        click.echo(f"   • Use smaller --batch-size (20 instead of {batch_size})")
+                        click.echo(f"   • Use --max-items=50 to limit items per facet")
+                        click.echo(f"   • Process fewer facets at once")
+                        break
+                    
+                    # Mark facet as error in database
+                    storage.update_facet_discovery(
+                        facet['id'], 
+                        status='error', 
+                        error_message=error_msg[:500]  # Limit error message length
+                    )
+                    
+                    if skip_errors:
+                        click.echo(f"\n⚠️ Skipping facet {facet['facet_value']}: {error_msg}")
+                        pbar.set_postfix(discovered=total_discovered, errors=errors_count)
+                    else:
+                        click.echo(f"\n❌ Failed on facet {facet['facet_value']}: {error_msg}")
+                        click.echo("Use --skip-errors to continue past failed facets")
+                        break
                 
                 pbar.update(1)
         
@@ -746,12 +822,24 @@ def auto_discover_facets(auto_enqueue, batch_size, max_items):
         click.echo(f"   📄 Total items discovered: {total_discovered:,}")
         if auto_enqueue:
             click.echo(f"   ⬇️ Total items enqueued: {total_enqueued:,}")
+        if errors_count > 0:
+            click.echo(f"   ❌ Facets with errors: {errors_count}")
         
         # Show updated stats
         stats = storage.get_discovery_stats()
         click.echo(f"\n📊 Updated Stats:")
         click.echo(f"   Completed facets: {stats['completed_facets']}/{stats['total_facets']}")
+        click.echo(f"   Error facets: {stats['error_facets']}")
         click.echo(f"   Total discovered items: {stats['discovered_items']:,}")
+        
+        # Show problematic facets if any
+        if skipped_facets:
+            click.echo(f"\n⚠️  Problematic facets (use 'list-facets' to see details):")
+            for error in skipped_facets[:5]:  # Show first 5
+                click.echo(f"   • {error}")
+            if len(skipped_facets) > 5:
+                click.echo(f"   ... and {len(skipped_facets)-5} more")
+            click.echo(f"\n💡 You can retry failed facets later or use different batch sizes")
         
         if not auto_enqueue and total_discovered > 0:
             click.echo(f"\n💡 Run 'newsagger auto-enqueue' to queue discovered content for download.")
@@ -966,17 +1054,64 @@ def setup_download_workflow(start_year, end_year, states, auto_discover, auto_en
             facet_ids.extend(state_facet_ids)
         
         if auto_discover:
-            # Step 3: Auto-discover content
+            # Step 3: Auto-discover content with rate-limiting safe settings
             click.echo(f"\n🔍 Step 3: Auto-discovering content...")
-            # Get all pending facets and discover their content
             facets = storage.get_search_facets(status='pending')
-            total_discovered = 0
-            with tqdm(desc="Auto-discovering", total=len(facets)) as pbar:
-                for facet in facets:
-                    discovered = discovery.discover_facet_content(facet['id'], batch_size=100)
-                    total_discovered += discovered
-                    pbar.update(1)
-            click.echo(f"✅ Auto-discovered {total_discovered:,} items")
+            
+            # Estimate API calls and warn if too many
+            estimated_api_calls = len(facets) * 5  # Conservative estimate
+            estimated_minutes = estimated_api_calls / 20  # 20 requests per minute
+            
+            click.echo(f"   📋 Found {len(facets)} facets to discover")
+            click.echo(f"   ⚠️  Using conservative settings to avoid rate limiting")
+            click.echo(f"   📊 Estimated {estimated_api_calls} API calls (~{estimated_minutes:.1f} minutes)")
+            
+            if estimated_minutes > 30:
+                click.echo(f"   ⚠️  This will take >{estimated_minutes:.1f} minutes due to rate limits")
+                if not click.confirm("   Continue with auto-discovery?"):
+                    click.echo("   Skipping auto-discovery. Run 'newsagger auto-discover-facets' later")
+                    auto_discover = False
+
+            if auto_discover:
+                total_discovered = 0
+                errors = 0
+                
+                with tqdm(desc="Auto-discovering", total=len(facets)) as pbar:
+                    for facet in facets:
+                        try:
+                            # Use conservative settings to avoid rate limiting:
+                            # - Small batch_size (20) to reduce API calls per facet
+                            # - Limit max_items (100) per facet to keep it manageable
+                            discovered = discovery.discover_facet_content(
+                                facet['id'], 
+                                batch_size=20,  # Conservative batch size
+                                max_items=100   # Limit per facet
+                            )
+                            total_discovered += discovered
+                            pbar.set_postfix(discovered=total_discovered, errors=errors)
+                            
+                        except Exception as e:
+                            errors += 1
+                            error_msg = str(e)
+                            
+                            # Check for rate limiting
+                            if "Rate limited" in error_msg or "429" in error_msg:
+                                click.echo(f"\n🛑 RATE LIMITED by LoC API during auto-discovery!")
+                                click.echo(f"   Progress saved: {total_discovered:,} items discovered")
+                                click.echo(f"   You can resume later with 'newsagger auto-discover-facets'")
+                                break
+                            else:
+                                # Mark as error and continue
+                                storage.update_facet_discovery(facet['id'], status='error', error_message=error_msg[:500])
+                                pbar.set_postfix(discovered=total_discovered, errors=errors)
+                        
+                        pbar.update(1)
+                
+                if errors > 0:
+                    click.echo(f"✅ Auto-discovered {total_discovered:,} items ({errors} errors)")
+                    click.echo(f"   💡 Use 'newsagger retry-failed-facets' to retry failed ones")
+                else:
+                    click.echo(f"✅ Auto-discovered {total_discovered:,} items")
             
         if auto_enqueue:
             # Step 4: Auto-enqueue content
@@ -1304,6 +1439,116 @@ def reset_stuck_downloads():
     
     except Exception as e:
         click.echo(f"❌ Failed to reset stuck downloads: {e}")
+
+
+@cli.command()
+def reset_stuck_facets():
+    """Reset facets stuck in 'discovering' status back to pending."""
+    config = Config()
+    storage = NewsStorage(**config.get_storage_config())
+    
+    # Find facets stuck in discovering status
+    stuck_facets = storage.get_search_facets(status='discovering')
+    
+    if not stuck_facets:
+        click.echo("✅ No stuck facets found")
+        return
+    
+    click.echo(f"🔧 Found {len(stuck_facets)} facets stuck in 'discovering' status")
+    
+    for facet in stuck_facets:
+        click.echo(f"   📅 {facet['facet_value']} (ID: {facet['id']})")
+    
+    if click.confirm("Reset these facets to pending status?"):
+        import sqlite3
+        with sqlite3.connect(storage.db_path) as conn:
+            for facet in stuck_facets:
+                conn.execute("""
+                    UPDATE search_facets 
+                    SET status = 'pending', error_message = NULL, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                """, (facet['id'],))
+            conn.commit()
+        
+        click.echo(f"✅ Reset {len(stuck_facets)} facets to pending status")
+        click.echo("💡 Run 'newsagger auto-discover-facets --skip-errors' to retry them")
+    else:
+        click.echo("Cancelled")
+
+
+@cli.command()
+@click.option('--batch-size', default=50, help='Smaller batch size for retry')
+@click.option('--max-items', default=500, type=int, help='Limit items per facet for problematic ones')
+def retry_failed_facets(batch_size, max_items):
+    """Retry facets that failed during discovery with smaller batch sizes."""
+    config = Config()
+    client = LocApiClient(**config.get_api_config())
+    processor = NewsDataProcessor()
+    storage = NewsStorage(**config.get_storage_config())
+    discovery = DiscoveryManager(client, processor, storage)
+    
+    # Find failed facets
+    failed_facets = storage.get_search_facets(status='error')
+    
+    if not failed_facets:
+        click.echo("✅ No failed facets to retry")
+        return
+    
+    click.echo(f"🔄 Found {len(failed_facets)} failed facets to retry")
+    click.echo(f"   Using smaller batch size ({batch_size}) and item limit ({max_items})")
+    
+    for facet in failed_facets[:5]:  # Show first 5
+        error_msg = facet.get('error_message', 'Unknown error')[:100]
+        click.echo(f"   📅 {facet['facet_value']}: {error_msg}")
+    
+    if len(failed_facets) > 5:
+        click.echo(f"   ... and {len(failed_facets)-5} more")
+    
+    if not click.confirm("Retry these facets with conservative settings?"):
+        click.echo("Cancelled")
+        return
+    
+    total_discovered = 0
+    success_count = 0
+    
+    with tqdm(desc="Retrying failed facets", total=len(failed_facets)) as pbar:
+        for facet in failed_facets:
+            pbar.set_description(f"Retrying {facet['facet_value']}")
+            
+            try:
+                # Reset facet to pending first
+                storage.update_facet_discovery(facet['id'], status='pending', error_message=None)
+                
+                # Try discovery with conservative settings
+                discovered_count = discovery.discover_facet_content(
+                    facet['id'], 
+                    batch_size=batch_size,
+                    max_items=max_items
+                )
+                
+                total_discovered += discovered_count
+                success_count += 1
+                pbar.set_postfix(success=success_count, discovered=total_discovered)
+                
+            except Exception as e:
+                # Mark as failed again
+                storage.update_facet_discovery(
+                    facet['id'], 
+                    status='error', 
+                    error_message=f"Retry failed: {str(e)[:400]}"
+                )
+                pbar.set_postfix(success=success_count, discovered=total_discovered)
+            
+            pbar.update(1)
+    
+    click.echo(f"\n✅ Retry complete!")
+    click.echo(f"   🎯 Successfully retried: {success_count}/{len(failed_facets)} facets")
+    click.echo(f"   📄 Items discovered: {total_discovered:,}")
+    
+    remaining_failed = len(failed_facets) - success_count
+    if remaining_failed > 0:
+        click.echo(f"   ❌ Still failing: {remaining_failed} facets")
+        click.echo("💡 These facets may have data issues or need manual investigation")
 
 
 @cli.command()

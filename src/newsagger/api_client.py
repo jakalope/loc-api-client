@@ -40,15 +40,23 @@ class LocApiClient:
                 
                 # Handle rate limiting (429) or CAPTCHA responses
                 if response.status_code == 429:
-                    self.logger.warning(f"Rate limited (429), waiting 1 hour before retry")
-                    time.sleep(3600)  # Wait 1 hour as per LOC guidelines
-                    continue
+                    self.logger.warning(f"Rate limited (429) - LOC API requires 1 hour wait")
+                    self.logger.warning(f"You can interrupt with Ctrl+C and try again later")
+                    self.logger.warning(f"Consider using --batch-size=20 to reduce API calls")
+                    
+                    # Instead of blocking for 1 hour, raise an exception that can be handled
+                    raise requests.exceptions.RequestException(
+                        "Rate limited by LOC API (429). Must wait ~1 hour before retry. "
+                        "Try reducing batch size or running discovery later."
+                    )
                 
                 # Check for CAPTCHA in HTML response
                 if 'captcha' in response.text.lower() or 'recaptcha' in response.text.lower():
-                    self.logger.warning(f"CAPTCHA detected, waiting 1 hour before retry")
-                    time.sleep(3600)
-                    continue
+                    self.logger.warning(f"CAPTCHA detected - LOC API requires wait")
+                    raise requests.exceptions.RequestException(
+                        "CAPTCHA detected by LOC API. Must wait before retry. "
+                        "Try running discovery later with reduced batch size."
+                    )
                 
                 response.raise_for_status()
                 return response.json()
