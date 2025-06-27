@@ -9,7 +9,7 @@ import json
 from typing import List, Dict
 from tqdm import tqdm
 from .config import Config
-from .api_client import LocApiClient
+from .rate_limited_client import LocApiClient
 from .processor import NewsDataProcessor
 from .storage import NewsStorage
 from .discovery import DiscoveryManager
@@ -743,9 +743,39 @@ def auto_discover_facets(auto_enqueue, batch_size, max_items, skip_errors, timeo
         errors_count = 0
         skipped_facets = []
         
-        with tqdm(desc="Auto-discovering", total=len(facets)) as pbar:
+        with tqdm(desc="Auto-discovering", total=len(facets)) as main_pbar:
             for i, facet in enumerate(facets):
-                pbar.set_description(f"Discovering {facet['facet_type']}: {facet['facet_value']}")
+                main_pbar.set_description(f"Discovering {facet['facet_type']}: {facet['facet_value']}")
+                
+                # Initialize nested progress bar for this facet
+                batch_pbar = None
+                current_page = 0
+                
+                def update_batch_progress(progress_info):
+                    nonlocal batch_pbar, current_page
+                    
+                    # Create or update batch progress bar
+                    if batch_pbar is None:
+                        # Estimate batches based on estimated items (if available)
+                        estimated_items = facet.get('estimated_items', 1000)
+                        estimated_batches = max(1, estimated_items // batch_size)
+                        batch_pbar = tqdm(
+                            desc=f"  Batches for {facet['facet_value'][:20]}",
+                            total=estimated_batches,
+                            leave=False,
+                            position=1
+                        )
+                    
+                    # Update progress
+                    if progress_info['page'] > current_page:
+                        batch_pbar.update(progress_info['page'] - current_page)
+                        current_page = progress_info['page']
+                    
+                    # Update postfix with real-time stats
+                    batch_pbar.set_postfix(
+                        page=progress_info['page'],
+                        items=progress_info['total_discovered']
+                    )
                 
                 try:
                     # Add timeout handling using signal (for Unix systems)
@@ -759,16 +789,21 @@ def auto_discover_facets(auto_enqueue, batch_size, max_items, skip_errors, timeo
                         signal.signal(signal.SIGALRM, timeout_handler)
                         signal.alarm(timeout_seconds)
                     
-                    # Discover content for this facet
+                    # Discover content for this facet with progress callback
                     discovered_count = discovery.discover_facet_content(
                         facet['id'], 
                         batch_size=batch_size,
-                        max_items=max_items
+                        max_items=max_items,
+                        progress_callback=update_batch_progress
                     )
                     
                     # Cancel the timeout
                     if hasattr(signal, 'SIGALRM'):
                         signal.alarm(0)
+                    
+                    # Close batch progress bar
+                    if batch_pbar:
+                        batch_pbar.close()
                     
                     total_discovered += discovered_count
                     
@@ -776,18 +811,29 @@ def auto_discover_facets(auto_enqueue, batch_size, max_items, skip_errors, timeo
                     if auto_enqueue and discovered_count > 0:
                         enqueued = discovery.enqueue_facet_content(facet['id'])
                         total_enqueued += enqueued
-                        pbar.set_postfix(discovered=total_discovered, enqueued=total_enqueued, errors=errors_count)
+                        main_pbar.set_postfix(discovered=total_discovered, enqueued=total_enqueued, errors=errors_count)
                     else:
-                        pbar.set_postfix(discovered=total_discovered, errors=errors_count)
+                        main_pbar.set_postfix(discovered=total_discovered, errors=errors_count)
                 
                 except (TimeoutError, Exception) as e:
                     # Cancel the timeout
                     if hasattr(signal, 'SIGALRM'):
                         signal.alarm(0)
                     
+                    # Close batch progress bar if it exists
+                    if batch_pbar:
+                        batch_pbar.close()
+                    
                     errors_count += 1
                     error_msg = str(e)
                     skipped_facets.append(f"{facet['facet_value']}: {error_msg}")
+                    
+                    # Detailed error logging
+                    click.echo(f"\n❌ ERROR on facet {facet['id']} ({facet['facet_type']} = {facet['facet_value']}):")
+                    click.echo(f"   Error: {error_msg}")
+                    if hasattr(e, '__traceback__'):
+                        import traceback
+                        click.echo(f"   Traceback: {traceback.format_exc()}")
                     
                     # Check for rate limiting specifically
                     if "Rate limited" in error_msg or "429" in error_msg:
@@ -810,13 +856,13 @@ def auto_discover_facets(auto_enqueue, batch_size, max_items, skip_errors, timeo
                     
                     if skip_errors:
                         click.echo(f"\n⚠️ Skipping facet {facet['facet_value']}: {error_msg}")
-                        pbar.set_postfix(discovered=total_discovered, errors=errors_count)
+                        main_pbar.set_postfix(discovered=total_discovered, errors=errors_count)
                     else:
                         click.echo(f"\n❌ Failed on facet {facet['facet_value']}: {error_msg}")
                         click.echo("Use --skip-errors to continue past failed facets")
                         break
                 
-                pbar.update(1)
+                main_pbar.update(1)
         
         click.echo(f"\n✅ Discovery complete!")
         click.echo(f"   📄 Total items discovered: {total_discovered:,}")
@@ -976,17 +1022,45 @@ def auto_enqueue(priority_facets, max_size_gb, dry_run):
         
         # Actually enqueue the content
         enqueued_total = 0
-        with tqdm(desc="Enqueuing content", total=len(items_by_facet)) as pbar:
+        with tqdm(desc="Auto-enqueuing", total=len(items_by_facet)) as main_pbar:
             for facet_id, info in items_by_facet.items():
                 facet = info['facet']
-                pbar.set_description(f"Enqueuing {facet['facet_type']}: {facet['facet_value']}")
+                main_pbar.set_description(f"Enqueuing {facet['facet_type']}: {facet['facet_value']}")
+                
+                # Initialize nested progress bar for large enqueuing operations
+                item_pbar = None
+                
+                def update_enqueue_progress(progress_info):
+                    nonlocal item_pbar
+                    
+                    # Create item progress bar for large operations (>1000 items)
+                    if item_pbar is None and progress_info['total_pages'] > 1000:
+                        item_pbar = tqdm(
+                            desc=f"  Items for {facet['facet_value'][:20]}",
+                            total=progress_info['total_pages'],
+                            leave=False,
+                            position=1,
+                            unit="items"
+                        )
+                    
+                    # Update item progress
+                    if item_pbar:
+                        item_pbar.n = progress_info['current_item']
+                        item_pbar.refresh()
                 
                 enqueued = discovery.enqueue_facet_content(
                     facet_id,
-                    max_items=info['items']
+                    max_items=info['items'],
+                    progress_callback=update_enqueue_progress
                 )
+                
+                # Close item progress bar if it exists
+                if item_pbar:
+                    item_pbar.close()
+                
                 enqueued_total += enqueued
-                pbar.update(1)
+                main_pbar.set_postfix(enqueued=f"{enqueued_total:,}")
+                main_pbar.update(1)
         
         click.echo(f"\n✅ Enqueuing complete!")
         click.echo(f"   ⬇️ Total items enqueued: {enqueued_total:,}")
@@ -1005,14 +1079,372 @@ def auto_enqueue(priority_facets, max_size_gb, dry_run):
 
 
 @cli.command()
+@click.option('--interval', default=5, type=int, help='Update interval in seconds')
+@click.option('--count', default=0, type=int, help='Number of updates (0 for infinite)')
+def watch_progress(interval, count):
+    """Real-time monitoring of discovery and download progress."""
+    config = Config()
+    storage = NewsStorage(**config.get_storage_config())
+    
+    import time
+    
+    try:
+        iterations = 0
+        while count == 0 or iterations < count:
+            # Clear screen
+            click.clear()
+            
+            # Show current timestamp
+            from datetime import datetime
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            click.echo(f"🕐 Live Progress Monitor - {now} (refreshing every {interval}s)")
+            click.echo("=" * 60)
+            
+            # Discovery stats
+            stats = storage.get_discovery_stats()
+            click.echo(f"\n📊 Discovery Progress:")
+            click.echo(f"   Total facets: {stats['total_facets']}")
+            click.echo(f"   Completed: {stats['completed_facets']} ({100*stats['completed_facets']/max(1,stats['total_facets']):.1f}%)")
+            click.echo(f"   Discovering: {stats['discovering_facets']}")
+            click.echo(f"   Error facets: {stats['error_facets']}")
+            click.echo(f"   Items discovered: {stats['discovered_items']:,}")
+            
+            # Queue stats
+            queue_stats = storage.get_download_queue_stats()
+            click.echo(f"\n⬇️ Download Queue:")
+            click.echo(f"   Queued: {queue_stats.get('queued', 0):,}")
+            click.echo(f"   Active: {queue_stats.get('active', 0):,}")
+            click.echo(f"   Completed: {queue_stats.get('completed', 0):,}")
+            click.echo(f"   Failed: {queue_stats.get('failed', 0):,}")
+            click.echo(f"   Total size: {queue_stats.get('total_size_mb', 0)/1024:.1f} GB")
+            
+            # Recent activity (show facets currently being discovered)
+            active_facets = storage.get_search_facets(status=['discovering'])
+            if active_facets:
+                click.echo(f"\n🔍 Currently Discovering:")
+                for facet in active_facets[:3]:  # Show top 3
+                    discovered = facet.get('items_discovered', 0)
+                    click.echo(f"   • {facet['facet_type']}: {facet['facet_value']} ({discovered:,} items)")
+            
+            # Recent downloads
+            try:
+                recent_downloads = storage.get_recent_downloads(limit=3)
+                if recent_downloads:
+                    click.echo(f"\n📥 Recent Downloads:")
+                    for item in recent_downloads:
+                        click.echo(f"   • {item.get('title', 'Unknown')[:50]}...")
+            except:
+                pass  # Skip if method doesn't exist
+            
+            click.echo(f"\n💡 Press Ctrl+C to stop monitoring")
+            
+            if count > 0:
+                click.echo(f"   Updates remaining: {count - iterations - 1}")
+            
+            iterations += 1
+            if count == 0 or iterations < count:
+                time.sleep(interval)
+                
+    except KeyboardInterrupt:
+        click.echo(f"\n👋 Monitoring stopped.")
+    except Exception as e:
+        click.echo(f"\n❌ Monitoring error: {e}")
+
+
+@cli.command()
+@click.option('--facet-id', type=int, help='Reset specific facet by ID')
+@click.option('--all-stuck', is_flag=True, help='Reset all facets stuck in discovering status')
+def reset_stuck_facets(facet_id, all_stuck):
+    """Reset facets that are stuck in discovering status for resume."""
+    config = Config()
+    storage = NewsStorage(**config.get_storage_config())
+    
+    if facet_id:
+        # Reset specific facet
+        facet = storage.get_search_facet(facet_id)
+        if not facet:
+            click.echo(f"❌ Facet {facet_id} not found")
+            return
+        
+        if facet['status'] == 'discovering':
+            # Reset to pending but preserve discovered items
+            storage.update_facet_discovery(
+                facet_id,
+                status='pending',
+                current_page=facet.get('resume_from_page', 1)
+            )
+            click.echo(f"✅ Reset facet {facet_id} ({facet['facet_value']}) to resume from page {facet.get('resume_from_page', 1)}")
+        else:
+            click.echo(f"⚠️ Facet {facet_id} is not stuck (status: {facet['status']})")
+    
+    elif all_stuck:
+        # Find all stuck facets
+        stuck_facets = storage.get_search_facets(status=['discovering'])
+        if not stuck_facets:
+            click.echo("✅ No stuck facets found")
+            return
+        
+        click.echo(f"🔧 Found {len(stuck_facets)} stuck facets:")
+        for facet in stuck_facets:
+            resume_page = facet.get('resume_from_page', 1)
+            storage.update_facet_discovery(
+                facet['id'],
+                status='pending',
+                current_page=resume_page
+            )
+            click.echo(f"   • Reset {facet['facet_value']} (will resume from page {resume_page})")
+        
+        click.echo(f"\n✅ Reset {len(stuck_facets)} facets for resume")
+    
+    else:
+        click.echo("❌ Please specify either --facet-id or --all-stuck")
+
+
+@cli.command()
+@click.option('--num-workers', default=4, type=int, help='Number of worker databases to create')
+@click.option('--output-dir', default='./distributed', help='Directory to store worker databases')
+@click.option('--include-completed', is_flag=True, help='Include completed facets for redistribution')
+def split_database(num_workers, output_dir, include_completed):
+    """Split remaining work into multiple databases for distributed processing."""
+    config = Config()
+    storage = NewsStorage(**config.get_storage_config())
+    
+    import os
+    import shutil
+    from pathlib import Path
+    
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Get facets to distribute
+    if include_completed:
+        facets = storage.get_search_facets()
+    else:
+        facets = storage.get_search_facets(status=['pending', 'discovering', 'error'])
+    
+    if not facets:
+        click.echo("❌ No facets found to distribute")
+        return
+    
+    click.echo(f"🔄 Splitting {len(facets)} facets across {num_workers} worker databases...")
+    
+    # Calculate facets per worker
+    facets_per_worker = len(facets) // num_workers
+    remainder = len(facets) % num_workers
+    
+    worker_assignments = []
+    start_idx = 0
+    
+    for i in range(num_workers):
+        # Add one extra facet to first 'remainder' workers
+        worker_size = facets_per_worker + (1 if i < remainder else 0)
+        end_idx = start_idx + worker_size
+        worker_facets = facets[start_idx:end_idx]
+        worker_assignments.append(worker_facets)
+        start_idx = end_idx
+    
+    # Create worker databases
+    for worker_id, worker_facets in enumerate(worker_assignments):
+        worker_db_path = output_path / f"worker_{worker_id}.db"
+        
+        # Copy main database structure
+        shutil.copy2(storage.db_path, worker_db_path)
+        
+        # Create worker storage instance
+        worker_storage = NewsStorage(str(worker_db_path))
+        
+        # Clear all facets and keep only assigned ones
+        with worker_storage._get_connection() as conn:
+            # Clear existing facets
+            conn.execute("DELETE FROM search_facets")
+            
+            # Insert assigned facets
+            for facet in worker_facets:
+                conn.execute("""
+                    INSERT INTO search_facets 
+                    (id, facet_type, facet_value, facet_query, estimated_items,
+                     actual_items, items_discovered, items_downloaded,
+                     discovery_started, discovery_completed, status, error_message,
+                     current_page, last_batch_size, resume_from_page)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    facet['id'], facet['facet_type'], facet['facet_value'], 
+                    facet.get('query'), facet.get('estimated_items', 0),
+                    facet.get('actual_items', 0), facet.get('items_discovered', 0),
+                    facet.get('items_downloaded', 0), facet.get('discovery_started'),
+                    facet.get('discovery_completed'), facet.get('status', 'pending'),
+                    facet.get('error_message'), facet.get('current_page', 1),
+                    facet.get('last_batch_size', 100), facet.get('resume_from_page', 1)
+                ))
+            
+            conn.commit()
+        
+        # Create worker configuration
+        worker_config_path = output_path / f"worker_{worker_id}_config.txt"
+        with open(worker_config_path, 'w') as f:
+            f.write(f"# Worker {worker_id} Configuration\n")
+            f.write(f"DATABASE_PATH={worker_db_path.absolute()}\n")
+            f.write(f"WORKER_ID={worker_id}\n")
+            f.write(f"ASSIGNED_FACETS={len(worker_facets)}\n")
+            f.write(f"FACET_IDS={','.join(str(f['id']) for f in worker_facets)}\n")
+        
+        click.echo(f"   ✅ Worker {worker_id}: {len(worker_facets)} facets → {worker_db_path}")
+    
+    # Create master coordination file
+    master_config_path = output_path / "master_config.json"
+    import json
+    master_config = {
+        "num_workers": num_workers,
+        "source_database": str(storage.db_path),
+        "worker_databases": [f"worker_{i}.db" for i in range(num_workers)],
+        "created_at": datetime.now().isoformat(),
+        "total_facets": len(facets),
+        "facets_per_worker": [len(assignments) for assignments in worker_assignments]
+    }
+    
+    with open(master_config_path, 'w') as f:
+        json.dump(master_config, f, indent=2)
+    
+    click.echo(f"\n🎉 Database splitting complete!")
+    click.echo(f"   📁 Output directory: {output_path}")
+    click.echo(f"   🔢 Workers created: {num_workers}")
+    click.echo(f"   📊 Facets distributed: {len(facets)}")
+    click.echo(f"\n💡 Next steps:")
+    click.echo(f"   1. Deploy worker databases to different machines/proxies")
+    click.echo(f"   2. Run discovery on each worker: python main.py auto-discover-facets --database worker_X.db")
+    click.echo(f"   3. Merge results back: python main.py merge-databases {output_dir}")
+
+
+@cli.command()
+@click.argument('distributed_dir', type=click.Path(exists=True))
+@click.option('--dry-run', is_flag=True, help='Show what would be merged without doing it')
+def merge_databases(distributed_dir, dry_run):
+    """Merge completed work from distributed worker databases back into master."""
+    config = Config()
+    master_storage = NewsStorage(**config.get_storage_config())
+    
+    from pathlib import Path
+    import json
+    import sqlite3
+    
+    dist_path = Path(distributed_dir)
+    master_config_path = dist_path / "master_config.json"
+    
+    if not master_config_path.exists():
+        click.echo(f"❌ Master config not found at {master_config_path}")
+        return
+    
+    with open(master_config_path) as f:
+        master_config = json.load(f)
+    
+    click.echo(f"🔄 Merging results from {master_config['num_workers']} worker databases...")
+    
+    total_merged_facets = 0
+    total_merged_pages = 0
+    
+    for worker_id in range(master_config['num_workers']):
+        worker_db_path = dist_path / f"worker_{worker_id}.db"
+        
+        if not worker_db_path.exists():
+            click.echo(f"⚠️ Worker database not found: {worker_db_path}")
+            continue
+        
+        click.echo(f"\n📥 Processing worker {worker_id}...")
+        
+        # Connect to worker database
+        with sqlite3.connect(worker_db_path) as worker_conn:
+            worker_conn.row_factory = sqlite3.Row
+            
+            # Get completed facets from worker
+            cursor = worker_conn.execute("""
+                SELECT * FROM search_facets 
+                WHERE status = 'completed' AND items_discovered > 0
+            """)
+            completed_facets = cursor.fetchall()
+            
+            if not completed_facets:
+                click.echo(f"   ℹ️ No completed work found")
+                continue
+            
+            # Get discovered pages for completed facets
+            facet_ids = [str(f['id']) for f in completed_facets]
+            cursor = worker_conn.execute(f"""
+                SELECT * FROM pages 
+                WHERE item_id IN (
+                    SELECT reference_id FROM download_queue 
+                    WHERE queue_type = 'page'
+                )
+            """)
+            discovered_pages = cursor.fetchall()
+            
+            if dry_run:
+                click.echo(f"   📊 Would merge: {len(completed_facets)} facets, {len(discovered_pages)} pages")
+                total_merged_facets += len(completed_facets)
+                total_merged_pages += len(discovered_pages)
+                continue
+            
+            # Merge into master database
+            with master_storage._get_connection() as master_conn:
+                # Update facet progress
+                for facet in completed_facets:
+                    master_conn.execute("""
+                        UPDATE search_facets 
+                        SET actual_items = ?, items_discovered = ?, status = ?,
+                            discovery_completed = ?, current_page = ?, 
+                            last_batch_size = ?, resume_from_page = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                    """, (
+                        facet['actual_items'], facet['items_discovered'], facet['status'],
+                        facet['discovery_completed'], facet['current_page'],
+                        facet['last_batch_size'], facet['resume_from_page'], facet['id']
+                    ))
+                
+                # Merge discovered pages (INSERT OR REPLACE to handle duplicates)
+                for page in discovered_pages:
+                    master_conn.execute("""
+                        INSERT OR REPLACE INTO pages 
+                        (item_id, lccn, title, date, edition, sequence, page_url,
+                         pdf_url, jp2_url, ocr_url, thumbnail_url, metadata_json,
+                         downloaded, file_size_bytes, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, tuple(page))
+                
+                master_conn.commit()
+            
+            click.echo(f"   ✅ Merged: {len(completed_facets)} facets, {len(discovered_pages)} pages")
+            total_merged_facets += len(completed_facets)
+            total_merged_pages += len(discovered_pages)
+    
+    if dry_run:
+        click.echo(f"\n📊 Dry run summary:")
+        click.echo(f"   Would merge {total_merged_facets} completed facets")
+        click.echo(f"   Would merge {total_merged_pages} discovered pages")
+    else:
+        click.echo(f"\n🎉 Merge complete!")
+        click.echo(f"   📊 Merged {total_merged_facets} completed facets")
+        click.echo(f"   📄 Merged {total_merged_pages} discovered pages")
+        
+        # Show updated stats
+        stats = master_storage.get_discovery_stats()
+        click.echo(f"\n📈 Updated master database stats:")
+        click.echo(f"   Completed facets: {stats['completed_facets']}/{stats['total_facets']}")
+        click.echo(f"   Discovered items: {stats['discovered_items']:,}")
+
+
+@cli.command()
 @click.option('--start-year', default=1900, type=int, help='Start year')
 @click.option('--end-year', default=1920, type=int, help='End year')
 @click.option('--states', help='Comma-separated states to focus on')
 @click.option('--auto-discover', is_flag=True, help='Automatically discover content after creating facets')
 @click.option('--auto-enqueue', is_flag=True, help='Automatically enqueue discovered content')
 @click.option('--max-size-gb', default=10.0, type=float, help='Maximum download queue size in GB')
-def setup_download_workflow(start_year, end_year, states, auto_discover, auto_enqueue, max_size_gb):
+@click.option('--unlimited-discovery', is_flag=True, help='Discover ALL content (no per-facet limits)')
+def setup_download_workflow(start_year, end_year, states, auto_discover, auto_enqueue, max_size_gb, unlimited_discovery):
     """Set up complete automated download workflow from scratch.
+    
+    Use --unlimited-discovery to discover ALL content (no per-facet limits).
+    Default behavior uses conservative limits to avoid rate limiting.
     
     All progress is saved automatically - you can safely interrupt and resume.
     """
@@ -1063,7 +1495,10 @@ def setup_download_workflow(start_year, end_year, states, auto_discover, auto_en
             estimated_minutes = estimated_api_calls / 20  # 20 requests per minute
             
             click.echo(f"   📋 Found {len(facets)} facets to discover")
-            click.echo(f"   ⚠️  Using conservative settings to avoid rate limiting")
+            if unlimited_discovery:
+                click.echo(f"   🚀 Using UNLIMITED discovery (all content per facet)")
+            else:
+                click.echo(f"   ⚠️  Using conservative settings to avoid rate limiting")
             click.echo(f"   📊 Estimated {estimated_api_calls} API calls (~{estimated_minutes:.1f} minutes)")
             
             if estimated_minutes > 30:
@@ -1073,26 +1508,85 @@ def setup_download_workflow(start_year, end_year, states, auto_discover, auto_en
                     auto_discover = False
 
             if auto_discover:
+                import time
+                start_time = time.time()
                 total_discovered = 0
                 errors = 0
                 
+                click.echo(f"   🚀 Starting discovery of {len(facets)} facets...")
+                click.echo(f"   ⏱️  Started at: {time.strftime('%H:%M:%S')}")
+                
                 with tqdm(desc="Auto-discovering", total=len(facets)) as pbar:
-                    for facet in facets:
-                        try:
-                            # Use conservative settings to avoid rate limiting:
-                            # - Small batch_size (20) to reduce API calls per facet
-                            # - Limit max_items (100) per facet to keep it manageable
-                            discovered = discovery.discover_facet_content(
-                                facet['id'], 
-                                batch_size=20,  # Conservative batch size
-                                max_items=100   # Limit per facet
+                    for i, facet in enumerate(facets):
+                        # Update description to show current facet
+                        pbar.set_description(f"Discovering {facet['facet_type']}: {facet['facet_value']}")
+                        
+                        # Nested progress for this facet
+                        current_facet_items = 0
+                        current_page = 0
+                        
+                        def progress_callback(progress_info):
+                            nonlocal current_facet_items, current_page
+                            current_facet_items = progress_info['total_discovered']
+                            current_page = progress_info['page']
+                            
+                            # Calculate elapsed time and estimated remaining
+                            elapsed = time.time() - start_time
+                            elapsed_str = f"{elapsed/60:.1f}m" if elapsed > 60 else f"{elapsed:.0f}s"
+                            
+                            # Update main progress bar with detailed stats
+                            pbar.set_postfix(
+                                facet=f"{i+1}/{len(facets)}",
+                                page=current_page,
+                                items=current_facet_items,
+                                total=total_discovered + current_facet_items,
+                                elapsed=elapsed_str,
+                                errors=errors
                             )
+                        
+                        try:
+                            if unlimited_discovery:
+                                # Unlimited discovery: discover ALL content for each facet
+                                discovered = discovery.discover_facet_content(
+                                    facet['id'], 
+                                    batch_size=50,  # Reasonable batch size
+                                    max_items=None,  # No limit - discover everything
+                                    progress_callback=progress_callback
+                                )
+                            else:
+                                # Use conservative settings to avoid rate limiting:
+                                # - Small batch_size (20) to reduce API calls per facet
+                                # - Limit max_items (100) per facet to keep it manageable
+                                discovered = discovery.discover_facet_content(
+                                    facet['id'], 
+                                    batch_size=20,  # Conservative batch size
+                                    max_items=100,   # Limit per facet
+                                    progress_callback=progress_callback
+                                )
                             total_discovered += discovered
+                            
+                            # Show completion message for this facet with timing
+                            elapsed = time.time() - start_time
+                            elapsed_str = f"{elapsed/60:.1f}m" if elapsed > 60 else f"{elapsed:.0f}s"
+                            avg_per_facet = elapsed / (i + 1)
+                            remaining_estimate = (len(facets) - i - 1) * avg_per_facet
+                            remaining_str = f"{remaining_estimate/60:.1f}m" if remaining_estimate > 60 else f"{remaining_estimate:.0f}s"
+                            
+                            click.echo(f"\n✅ Completed {facet['facet_type']} {facet['facet_value']}: {discovered:,} items")
+                            click.echo(f"   ⏱️  Elapsed: {elapsed_str} | Est. remaining: {remaining_str} | Total discovered: {total_discovered:,}")
+                            
                             pbar.set_postfix(discovered=total_discovered, errors=errors)
                             
                         except Exception as e:
                             errors += 1
                             error_msg = str(e)
+                            
+                            # Detailed error logging
+                            click.echo(f"\n❌ ERROR on facet {facet['id']} ({facet['facet_type']} = {facet['facet_value']}):")
+                            click.echo(f"   Error: {error_msg}")
+                            if hasattr(e, '__traceback__'):
+                                import traceback
+                                click.echo(f"   Traceback: {traceback.format_exc()}")
                             
                             # Check for rate limiting
                             if "Rate limited" in error_msg or "429" in error_msg:

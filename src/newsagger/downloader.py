@@ -17,7 +17,7 @@ import time
 import mimetypes
 
 from .storage import NewsStorage
-from .api_client import LocApiClient
+from .rate_limited_client import LocApiClient
 
 
 class DownloadProcessor:

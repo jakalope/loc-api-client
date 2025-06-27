@@ -23,9 +23,47 @@ class NewsStorage:
         self.logger = logging.getLogger(__name__)
         self._init_database()
     
+    def _migrate_database(self, conn):
+        """Add new columns for enhanced batch-level resume functionality."""
+        try:
+            # Add batch tracking columns to search_facets table
+            cursor = conn.cursor()
+            
+            # Check if columns exist before adding them
+            cursor.execute("PRAGMA table_info(search_facets)")
+            existing_columns = [column[1] for column in cursor.fetchall()]
+            
+            if 'current_page' not in existing_columns:
+                cursor.execute("ALTER TABLE search_facets ADD COLUMN current_page INTEGER DEFAULT 1")
+                self.logger.info("Added current_page column for batch-level resume")
+            
+            if 'last_batch_size' not in existing_columns:
+                cursor.execute("ALTER TABLE search_facets ADD COLUMN last_batch_size INTEGER DEFAULT 100")
+                self.logger.info("Added last_batch_size column for batch-level resume")
+            
+            if 'last_successful_batch' not in existing_columns:
+                cursor.execute("ALTER TABLE search_facets ADD COLUMN last_successful_batch TIMESTAMP")
+                self.logger.info("Added last_successful_batch column for batch-level resume")
+            
+            if 'resume_from_page' not in existing_columns:
+                cursor.execute("ALTER TABLE search_facets ADD COLUMN resume_from_page INTEGER DEFAULT 1")
+                self.logger.info("Added resume_from_page column for batch-level resume")
+                
+            conn.commit()
+            
+        except Exception as e:
+            self.logger.warning(f"Database migration failed: {e}")
+    
+    def _get_connection(self):
+        """Get a database connection for context manager usage."""
+        return sqlite3.connect(self.db_path)
+    
     def _init_database(self):
         """Initialize database tables."""
         with sqlite3.connect(self.db_path) as conn:
+            # Check and add new columns for batch-level resume functionality
+            self._migrate_database(conn)
+            
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS newspapers (
                     lccn TEXT PRIMARY KEY,
@@ -522,8 +560,9 @@ class NewsStorage:
     
     def update_facet_discovery(self, facet_id: int, actual_items: int = None, 
                              items_discovered: int = None, status: str = None, 
-                             error_message: str = None):
-        """Update facet discovery progress."""
+                             error_message: str = None, current_page: int = None, 
+                             batch_size: int = None):
+        """Update facet discovery progress with batch-level tracking."""
         with sqlite3.connect(self.db_path) as conn:
             updates = ["updated_at = CURRENT_TIMESTAMP"]
             params = []
@@ -548,6 +587,19 @@ class NewsStorage:
             if error_message is not None:
                 updates.append("error_message = ?")
                 params.append(error_message)
+            
+            # Add batch tracking updates
+            if current_page is not None:
+                updates.append("current_page = ?")
+                params.append(current_page)
+                # Update resume_from_page to current_page for potential resume
+                updates.append("resume_from_page = ?")
+                params.append(current_page)
+            
+            if batch_size is not None:
+                updates.append("last_batch_size = ?")
+                params.append(batch_size)
+                updates.append("last_successful_batch = CURRENT_TIMESTAMP")
             
             params.append(facet_id)
             
@@ -830,11 +882,28 @@ class NewsStorage:
     def get_search_facet(self, facet_id: int) -> Optional[Dict]:
         """Get a specific search facet by ID."""
         with sqlite3.connect(self.db_path) as conn:
+            # Ensure migrations are applied for this connection
+            self._migrate_database(conn)
+            
             cursor = conn.cursor()
-            cursor.execute("""
-                SELECT id, facet_type, facet_value, facet_query, estimated_items,
-                       actual_items, items_discovered, items_downloaded,
-                       status, error_message, created_at, updated_at
+            
+            # Check what columns actually exist
+            cursor.execute("PRAGMA table_info(search_facets)")
+            existing_columns = [column[1] for column in cursor.fetchall()]
+            
+            # Build SELECT query based on available columns
+            base_columns = ["id", "facet_type", "facet_value", "facet_query", "estimated_items",
+                           "actual_items", "items_discovered", "items_downloaded", 
+                           "status", "error_message", "created_at", "updated_at"]
+            
+            optional_columns = ["current_page", "last_batch_size", "resume_from_page"]
+            available_optional = [col for col in optional_columns if col in existing_columns]
+            
+            all_columns = base_columns + available_optional
+            columns_str = ", ".join(all_columns)
+            
+            cursor.execute(f"""
+                SELECT {columns_str}
                 FROM search_facets 
                 WHERE id = ?
             """, (facet_id,))
@@ -842,21 +911,21 @@ class NewsStorage:
             row = cursor.fetchone()
             if not row:
                 return None
-                
-            return {
-                'id': row[0],
-                'facet_type': row[1],
-                'facet_value': row[2],
-                'query': row[3],
-                'estimated_items': row[4],
-                'actual_items': row[5],
-                'items_discovered': row[6],
-                'items_downloaded': row[7],
-                'status': row[8],
-                'error_message': row[9],
-                'created_at': row[10],
-                'updated_at': row[11]
-            }
+            
+            # Build result dict dynamically based on available columns
+            result = {}
+            for i, column_name in enumerate(all_columns):
+                if column_name == 'facet_query':
+                    result['query'] = row[i]  # Map facet_query to query
+                else:
+                    result[column_name] = row[i]
+            
+            # Set defaults for optional columns if they weren't in the result
+            result.setdefault('current_page', 1)
+            result.setdefault('last_batch_size', 100)
+            result.setdefault('resume_from_page', 1)
+            
+            return result
     
     def get_pages_for_facet(self, facet_id: int, downloaded: bool = None) -> List[Dict]:
         """Get pages discovered for a specific facet."""

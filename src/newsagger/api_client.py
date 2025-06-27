@@ -1,13 +1,21 @@
 """
 Library of Congress Chronicling America API Client
 
-Handles all interactions with the LOC API including rate limiting,
-error handling, and data retrieval.
+⚠️ DEPRECATED: This module is deprecated. Use rate_limited_client.LocApiClient instead.
+
+The new rate_limited_client module provides:
+- Centralized singleton rate limiting across all API clients
+- Better handling for 429 errors and CAPTCHA detection  
+- Thread-safe request management
+- Improved statistics and monitoring
+
+This file is kept for backward compatibility with existing test files.
 """
 
 import time
 import logging
 import requests
+import warnings
 from typing import Dict, List, Optional, Generator
 from urllib.parse import urljoin
 from datetime import datetime
@@ -19,6 +27,13 @@ class LocApiClient:
     
     def __init__(self, base_url: str = "https://chroniclingamerica.loc.gov/", 
                  request_delay: float = 3.0, max_retries: int = 3):
+        warnings.warn(
+            "api_client.LocApiClient is deprecated. Use rate_limited_client.LocApiClient instead "
+            "for centralized singleton rate limiting across all components.",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        
         self.base_url = base_url.rstrip('/') + '/'
         # LOC allows 20 requests/minute = 3 seconds between requests minimum
         self.request_delay = max(request_delay, 3.0)

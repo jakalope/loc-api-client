@@ -8,7 +8,7 @@ for systematic downloading from the Library of Congress API.
 import logging
 from typing import Dict, List, Optional, Tuple, Generator
 from datetime import datetime
-from .api_client import LocApiClient
+from .rate_limited_client import LocApiClient
 from .processor import NewsDataProcessor
 from .storage import NewsStorage
 
@@ -357,10 +357,17 @@ class DiscoveryManager:
         
         return summary
     
-    def discover_facet_content(self, facet_id: int, batch_size: int = 100, max_items: int = None) -> int:
+    def discover_facet_content(self, facet_id: int, batch_size: int = 100, max_items: int = None, 
+                              progress_callback=None) -> int:
         """
         Systematically discover all content for a specific facet.
         Returns the number of items discovered.
+        
+        Args:
+            facet_id: ID of the facet to discover
+            batch_size: Number of items per API call
+            max_items: Maximum items to discover (None for unlimited)
+            progress_callback: Optional callback function for progress updates
         """
         facet = self.storage.get_search_facet(facet_id)
         if not facet:
@@ -368,13 +375,19 @@ class DiscoveryManager:
         
         self.logger.info(f"Discovering content for facet {facet_id}: {facet['facet_type']} = {facet['facet_value']}")
         
-        # Update facet status to discovering
-        self.logger.debug(f"Setting facet {facet_id} status to discovering")
-        self.storage.update_facet_discovery(facet_id, status='discovering')
-        self.logger.debug(f"Facet {facet_id} status updated")
+        # Check for resume capability
+        resume_from_page = facet.get('resume_from_page', 1)
+        if resume_from_page > 1:
+            self.logger.info(f"Resuming facet {facet_id} discovery from page {resume_from_page}")
+            total_discovered = facet.get('items_discovered', 0)
+        else:
+            # Update facet status to discovering
+            self.logger.debug(f"Setting facet {facet_id} status to discovering")
+            self.storage.update_facet_discovery(facet_id, status='discovering')
+            self.logger.debug(f"Facet {facet_id} status updated")
+            total_discovered = 0
         
-        total_discovered = 0
-        page = 1
+        page = resume_from_page
         
         # Adjust batch size for different facet types
         if facet['facet_type'] == 'state':
@@ -403,7 +416,15 @@ class DiscoveryManager:
                     state_periodicals = self.storage.get_periodicals(state=facet['facet_value'])
                     if not state_periodicals:
                         self.logger.warning(f"No periodicals found for state {facet['facet_value']}")
-                        break
+                        # Mark this facet as completed with 0 items and continue to next facet
+                        self.storage.update_facet_discovery(
+                            facet_id, 
+                            actual_items=0,
+                            items_discovered=0,
+                            status='completed'
+                        )
+                        self.logger.info(f"Completed discovery for facet {facet_id}: 0 items (no periodicals for state)")
+                        return 0
                     
                     # Use the first few LCCNs from the state for more focused search
                     # This prevents massive result sets that timeout
@@ -460,11 +481,27 @@ class DiscoveryManager:
                 self.logger.debug(f"Stored {stored_count} pages for facet {facet_id}")
                 total_discovered += stored_count
                 
-                # Update facet progress
+                # Update facet progress with batch-level tracking
                 self.storage.update_facet_discovery(
                     facet_id, 
-                    items_discovered=total_discovered
+                    items_discovered=total_discovered,
+                    current_page=page,
+                    batch_size=batch_size
                 )
+                
+                # Call progress callback if provided
+                if progress_callback:
+                    progress_callback({
+                        'facet_id': facet_id,
+                        'page': page,
+                        'batch_items': stored_count,
+                        'total_discovered': total_discovered,
+                        'facet_value': facet['facet_value']
+                    })
+                
+                # Provide periodic status updates for long-running facets
+                if page % 10 == 0 and page > 0:  # Every 10 pages
+                    self.logger.info(f"Facet {facet_id} ({facet['facet_value']}): page {page}, {total_discovered:,} items discovered so far")
                 
                 self.logger.debug(f"Discovered {stored_count} items on page {page} for facet {facet_id}")
                 
@@ -522,10 +559,16 @@ class DiscoveryManager:
                 )
             raise
     
-    def enqueue_facet_content(self, facet_id: int, max_items: int = None) -> int:
+    def enqueue_facet_content(self, facet_id: int, max_items: int = None, 
+                             progress_callback=None) -> int:
         """
         Enqueue all discovered content from a facet for download.
         Returns the number of items enqueued.
+        
+        Args:
+            facet_id: ID of the facet to enqueue
+            max_items: Maximum items to enqueue (None for all)
+            progress_callback: Optional callback for progress updates
         """
         facet = self.storage.get_search_facet(facet_id)
         if not facet:
@@ -538,7 +581,7 @@ class DiscoveryManager:
             pages = pages[:max_items]
         
         enqueued_count = 0
-        for page in pages:
+        for i, page in enumerate(pages):
             # Estimate download size and time
             estimated_size_mb = 1.0  # Rough estimate: 1MB per page
             estimated_time_hours = 0.1  # Rough estimate: 0.1 hours per page
@@ -552,6 +595,15 @@ class DiscoveryManager:
                 estimated_time_hours=estimated_time_hours
             )
             enqueued_count += 1
+            
+            # Call progress callback every 100 items
+            if progress_callback and (i + 1) % 100 == 0:
+                progress_callback({
+                    'facet_id': facet_id,
+                    'enqueued_count': enqueued_count,
+                    'total_pages': len(pages),
+                    'current_item': i + 1
+                })
         
         self.logger.info(f"Enqueued {enqueued_count} items from facet {facet_id}")
         return enqueued_count
