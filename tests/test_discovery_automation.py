@@ -70,7 +70,7 @@ class TestDiscoveryAutomation:
         ]
         
         self.mock_api_client.search_pages.return_value = {
-            'results': mock_pages,
+            'items': mock_pages,
             'totalItems': 2
         }
         from newsagger.processor import PageInfo
@@ -131,7 +131,7 @@ class TestDiscoveryAutomation:
         
         # Mock empty response (no pages found)
         self.mock_api_client.search_pages.return_value = {
-            'results': [],
+            'items': [],
             'totalItems': 0
         }
         self.mock_processor.process_search_response.return_value = []
@@ -167,7 +167,7 @@ class TestDiscoveryAutomation:
         ]
         
         self.mock_api_client.search_pages.return_value = {
-            'results': mock_pages,
+            'items': mock_pages,
             'totalItems': 20
         }
         from newsagger.processor import PageInfo
@@ -356,11 +356,11 @@ class TestDiscoveryAutomation:
         
         # Mock API responses for multiple pages
         page1_response = {
-            'results': [{'id': f'item{i}', 'title': 'Test'} for i in range(1, 101)],
+            'items': [{'id': f'item{i}', 'title': 'Test'} for i in range(1, 101)],
             'totalItems': 150
         }
         page2_response = {
-            'results': [{'id': f'item{i}', 'title': 'Test'} for i in range(101, 151)],
+            'items': [{'id': f'item{i}', 'title': 'Test'} for i in range(101, 151)],
             'totalItems': 150
         }
         
@@ -418,7 +418,7 @@ class TestDiscoveryAutomation:
         
         # Mock API response
         self.mock_api_client.search_pages.return_value = {
-            'results': [{'id': 'item1', 'title': 'Earthquake News'}],
+            'items': [{'id': 'item1', 'title': 'Earthquake News'}],
             'totalItems': 1
         }
         from newsagger.processor import PageInfo

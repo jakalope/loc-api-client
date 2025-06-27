@@ -210,7 +210,7 @@ class TestLocApiClient:
         responses.add(
             responses.GET,
             'https://chroniclingamerica.loc.gov/search/pages/results/',
-            json={'results': []},
+            json={'items': []},
             status=200
         )
         
@@ -223,7 +223,7 @@ class TestLocApiClient:
             rows=100
         )
         
-        assert result == {'results': []}
+        assert result == {'items': []}
         url = responses.calls[0].request.url
         assert 'andtext=earthquake' in url
         assert 'date1=01%2F01%2F1906' in url  # Updated to match MM/DD/YYYY format
@@ -235,7 +235,7 @@ class TestLocApiClient:
         responses.add(
             responses.GET,
             'https://chroniclingamerica.loc.gov/search/pages/results/',
-            json={'results': []},
+            json={'items': []},
             status=200
         )
         

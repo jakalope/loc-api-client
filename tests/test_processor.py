@@ -163,7 +163,7 @@ class TestNewsDataProcessor:
     def test_process_search_response_deduplication(self, processor):
         """Test deduplication in search response processing."""
         response_with_duplicates = {
-            'results': [
+            'items': [
                 {'id': 'item1', 'title': 'Paper 1', 'lccn': 'test1'},
                 {'id': 'item2', 'title': 'Paper 2', 'lccn': 'test2'},
                 {'id': 'item1', 'title': 'Paper 1 Duplicate', 'lccn': 'test1'},  # Duplicate
@@ -184,7 +184,7 @@ class TestNewsDataProcessor:
     def test_process_search_response_no_deduplication(self, processor):
         """Test processing without deduplication."""
         response_with_duplicates = {
-            'results': [
+            'items': [
                 {'id': 'item1', 'title': 'Paper 1', 'lccn': 'test1'},
                 {'id': 'item1', 'title': 'Paper 1 Duplicate', 'lccn': 'test1'}
             ]
@@ -199,7 +199,7 @@ class TestNewsDataProcessor:
         """Test resetting deduplication cache."""
         # Process some items to populate the cache
         response = {
-            'results': [
+            'items': [
                 {'id': 'item1', 'title': 'Paper 1', 'lccn': 'test1'},
                 {'id': 'item2', 'title': 'Paper 2', 'lccn': 'test2'}
             ]

@@ -120,7 +120,7 @@ class TestIntegration:
         
         # Mock search response
         search_response = {
-            'results': [
+            'items': [
                 {
                     'id': 'item123',
                     'lccn': 'sn84038012',
@@ -218,7 +218,7 @@ class TestIntegration:
         
         # Mock search results for download
         download_response = {
-            'results': [
+            'items': [
                 {
                     'id': 'download_item1',
                     'lccn': 'sn84038012',
@@ -336,7 +336,7 @@ class TestIntegration:
         
         # First batch of results
         batch1 = {
-            'results': [
+            'items': [
                 {'id': 'item1', 'title': 'Page 1', 'lccn': 'test1'},
                 {'id': 'item2', 'title': 'Page 2', 'lccn': 'test1'}
             ]
@@ -344,7 +344,7 @@ class TestIntegration:
         
         # Second batch with one duplicate
         batch2 = {
-            'results': [
+            'items': [
                 {'id': 'item2', 'title': 'Page 2 Duplicate', 'lccn': 'test1'},  # Duplicate
                 {'id': 'item3', 'title': 'Page 3', 'lccn': 'test1'}
             ]

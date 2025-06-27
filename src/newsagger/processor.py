@@ -216,7 +216,8 @@ class NewsDataProcessor:
         """Process search results into structured page data with deduplication."""
         pages = []
         
-        for item in response.get('results', []):
+        # The LOC API returns items under 'items' key, not 'results'
+        for item in response.get('items', []):
             try:
                 page = PageInfo.from_search_result(item)
                 

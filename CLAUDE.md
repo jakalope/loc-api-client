@@ -241,3 +241,82 @@ python main.py download-priority --queue-type facet --priority 1
 ```
 
 The project is now ready for production use by researchers, digital humanities scholars, and institutions requiring systematic access to historical newspaper archives.
+
+## Project Requirements and Goals
+
+### **Primary Objectives**
+
+1. **Complete Archive Download**: Download everything available through the Library of Congress Chronicling America API automatically
+2. **Frequent Progress Updates**: Provide detailed, real-time progress reporting so users know the system is actively working
+3. **Robust Resume Functionality**: If the process is killed, resume close to where it left off with minimal data loss
+4. **Distributed Processing Support**: Enable breakdown of remaining tasks into N separate databases for distributed processing across multiple proxies/services (e.g., Cloudflare)
+
+### **Enhanced Requirements**
+
+#### **🎯 Complete Automation**
+- **Goal**: Systematically discover and download all historical newspaper content from the LoC API
+- **Scope**: All available years, states, and content types (PDF, JP2, OCR, metadata)
+- **Approach**: Automated workflow that requires minimal user intervention
+- **Scalability**: Handle millions of items across decades of historical content
+
+#### **📊 Enhanced Progress Reporting**
+- **Real-time Updates**: Show progress at multiple granularities (facets, batches, individual items)
+- **Nested Progress Bars**: Display both high-level progress (facets completed) and detailed progress (current batch within facet)
+- **Live Statistics**: Items discovered/enqueued/downloaded, error rates, throughput metrics
+- **Time Estimates**: Accurate ETA calculations based on current processing rates
+- **Status Monitoring**: Background monitoring commands to check progress without interrupting operations
+
+#### **🔄 Granular Resume Capability**
+- **Batch-Level Resume**: Resume from the exact batch being processed when interrupted
+- **State Preservation**: Maintain all progress state across process restarts
+- **Error Recovery**: Automatically retry failed operations on resume
+- **Progress Validation**: Verify data integrity when resuming long-running operations
+- **Incremental Checkpointing**: Save progress frequently to minimize lost work
+
+#### **🌐 Distributed Processing Architecture**
+- **Database Splitting**: Split remaining work into N independent databases
+- **Work Distribution**: Allocate facets/batches across multiple processing instances
+- **Result Consolidation**: Merge completed work from distributed databases back into master database
+- **Proxy Support**: Enable processing through multiple IP addresses/proxies to increase throughput
+- **Load Balancing**: Distribute work based on facet size and complexity
+- **Coordination**: Prevent duplicate work across distributed instances
+
+### **Implementation Priorities**
+
+1. **High Priority - Immediate Implementation**:
+   - Enhanced progress reporting with nested progress bars
+   - Granular resume functionality for batch-level interruption recovery
+   - Real-time monitoring commands and status displays
+
+2. **Medium Priority - Next Phase**:
+   - Database splitting and work distribution functionality
+   - Distributed processing coordination mechanisms
+   - Proxy rotation and load balancing support
+
+3. **Future Enhancements**:
+   - Web dashboard for monitoring distributed operations
+   - Advanced scheduling and throttling controls
+   - Automated error analysis and recovery strategies
+
+### **Technical Implementation Notes**
+
+#### **Progress Reporting Enhancements**
+- Implement nested `tqdm` progress bars for multi-level visibility
+- Add database polling threads for real-time progress updates
+- Create background monitoring commands that don't interfere with active operations
+- Include throughput metrics (items/minute, MB/minute) in progress displays
+
+#### **Resume Functionality Improvements**
+- Reduce checkpoint intervals from facet-level to batch-level (every 50-100 items)
+- Add progress validation on startup to detect and recover from incomplete operations
+- Implement automatic retry logic for failed batches on resume
+- Preserve detailed error information for troubleshooting interrupted operations
+
+#### **Distributed Processing Design**
+- Create database export/import utilities for work distribution
+- Implement work allocation algorithms based on facet characteristics
+- Add coordination mechanisms to prevent work duplication
+- Design result merging strategies that handle conflicts and duplicates
+- Support proxy configuration and rotation for distributed instances
+
+These requirements ensure the system can handle the massive scale of the complete LoC archive while providing excellent visibility into progress and robust recovery capabilities for long-running operations.

@@ -233,7 +233,7 @@ class LocApiClient:
         
         # Get a sample to estimate total results more accurately
         sample = self.search_pages(**search_params)
-        sample_results = sample.get('results', [])
+        sample_results = sample.get('items', [])
         
         if not sample_results:
             # No results found for this date range
@@ -257,7 +257,7 @@ class LocApiClient:
             for page in [2, 3]:
                 try:
                     next_sample = self.search_pages(page=page, **search_params)
-                    next_results = next_sample.get('results', [])
+                    next_results = next_sample.get('items', [])
                     if not next_results:
                         break
                     total_results += len(next_results)
@@ -328,13 +328,13 @@ class LocApiClient:
                     search_params['page'] = page
                     results = self.search_pages(**search_params)
                     
-                    if not results.get('results'):
+                    if not results.get('items'):
                         break
                         
                     yield results
                     
                     # Check if we have more pages and haven't hit limits
-                    if len(results.get('results', [])) < search_params.get('rows', 1000):
+                    if len(results.get('items', [])) < search_params.get('rows', 1000):
                         break
                     
                     page += 1
@@ -360,12 +360,12 @@ class LocApiClient:
                     search_params['page'] = page
                     results = self.search_pages(**search_params)
                     
-                    if not results.get('results'):
+                    if not results.get('items'):
                         break
                         
                     yield results
                     
-                    if len(results.get('results', [])) < search_params.get('rows', 1000):
+                    if len(results.get('items', [])) < search_params.get('rows', 1000):
                         break
                     
                     page += 1

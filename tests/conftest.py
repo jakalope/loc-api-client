@@ -96,7 +96,7 @@ def sample_newspapers_response(sample_newspaper_data):
 def sample_search_response(sample_page_data):
     """Sample search API response."""
     return {
-        'results': [sample_page_data],
+        'items': [sample_page_data],
         'totalItems': 1,
         'pagination': {'current': 1, 'total': 1}
     }
