@@ -79,6 +79,8 @@ class RateLimitedRequestManager:
         self.last_captcha_time = 0
         self.adaptive_delay_multiplier = 1.0
         self.consecutive_captchas = 0
+        self.session_start_time = time.time()
+        self.immediate_captcha_detected = False
         
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"Initialized rate-limited client: max {max_requests_per_minute} req/min")
@@ -137,6 +139,26 @@ class RateLimitedRequestManager:
         """
         current_time = time.time()
         time_since_last_captcha = current_time - self.last_captcha_time if self.last_captcha_time else float('inf')
+        time_since_session_start = current_time - self.session_start_time
+        
+        # Detect immediate CAPTCHA (within first 2 minutes of session)
+        if time_since_session_start < 120 and attempt == 0:
+            self.immediate_captcha_detected = True
+            self.logger.warning("Immediate CAPTCHA detected - API likely still in protection mode from previous session")
+            return {
+                'action': 'suggest_alternatives',
+                'strategy': 'persistent_captcha_state',
+                'message': (
+                    'CAPTCHA detected immediately on session start. '
+                    'API appears to still be in protection mode. '
+                    'Recommend waiting 2+ hours before resuming discovery operations.'
+                ),
+                'suggested_params': {
+                    'cooling_off_hours': 2,
+                    'persistent_state': True,
+                    'retry_with_splitting': True
+                }
+            }
         
         # Strategy 1: First CAPTCHA - Try reducing batch size and longer delay
         if attempt == 0:
