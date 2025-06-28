@@ -12,9 +12,10 @@ from typing import Dict, List, Optional, Tuple
 from pathlib import Path
 from datetime import datetime
 from .processor import NewspaperInfo, PageInfo
+from .utils import DatabaseOperationMixin
 
 
-class NewsStorage:
+class NewsStorage(DatabaseOperationMixin):
     """SQLite-based storage for news archive data."""
     
     def __init__(self, db_path: str = "./data/newsagger.db"):
@@ -455,30 +456,18 @@ class NewsStorage:
     def update_periodical_discovery(self, lccn: str, total_issues: int = None, 
                                   issues_discovered: int = None, complete: bool = False):
         """Update periodical discovery progress."""
-        with sqlite3.connect(self.db_path) as conn:
-            updates = ["updated_at = CURRENT_TIMESTAMP"]
-            params = []
-            
-            if total_issues is not None:
-                updates.append("total_issues = ?")
-                params.append(total_issues)
-                
-            if issues_discovered is not None:
-                updates.append("issues_discovered = ?")
-                params.append(issues_discovered)
-                
-            if complete:
-                updates.append("discovery_complete = TRUE")
-                updates.append("last_discovery_scan = CURRENT_TIMESTAMP")
-            
-            params.append(lccn)
-            
-            conn.execute(f"""
-                UPDATE periodicals 
-                SET {', '.join(updates)}
-                WHERE lccn = ?
-            """, params)
-            conn.commit()
+        # Build update parameters
+        updates = {}
+        if total_issues is not None:
+            updates['total_issues'] = total_issues
+        if issues_discovered is not None:
+            updates['issues_discovered'] = issues_discovered
+        if complete:
+            updates['discovery_complete'] = True
+            updates['last_discovery_scan'] = 'CURRENT_TIMESTAMP'
+        
+        # Use mixin helper for the actual update
+        self._build_dynamic_update('periodicals', 'lccn', lccn, **updates)
     
     def update_periodical_download(self, lccn: str, issues_downloaded: int = None, 
                                  complete: bool = False):
