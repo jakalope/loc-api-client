@@ -458,6 +458,53 @@ class TestCLI:
             assert "Creating state facets" in result.output
             mock_discovery_instance.create_state_facets.assert_called_once_with(['California', 'New York'])
 
+    def test_setup_download_workflow_resume_discovering_facets(self):
+        """Test that setup-download-workflow properly resumes facets with 'discovering' status."""
+        with patch('newsagger.cli.Config') as mock_config:
+            mock_config_instance = Mock()
+            mock_config_instance.get_api_config.return_value = {'base_url': 'test'}
+            mock_config_instance.get_storage_config.return_value = {'db_path': ':memory:'}
+            mock_config.return_value = mock_config_instance
+            
+            with patch('newsagger.cli.NewsStorage') as mock_storage, \
+                 patch('newsagger.cli.LocApiClient') as mock_client, \
+                 patch('newsagger.cli.NewsDataProcessor') as mock_processor, \
+                 patch('newsagger.cli.DiscoveryManager') as mock_discovery:
+                
+                mock_client_instance = Mock()
+                mock_client.return_value = mock_client_instance
+                
+                mock_processor_instance = Mock()
+                mock_processor.return_value = mock_processor_instance
+                
+                mock_storage_instance = Mock()
+                mock_storage_instance.get_periodicals.return_value = [{'lccn': 'test123'}]
+                # Mock facets including discovering status
+                mock_storage_instance.get_search_facets.return_value = [
+                    {'id': 1, 'facet_type': 'date_range', 'facet_value': '1900/1900', 'status': 'discovering', 'items_discovered': 38400},
+                    {'id': 2, 'facet_type': 'date_range', 'facet_value': '1901/1901', 'status': 'pending', 'items_discovered': 0}
+                ]
+                mock_storage.return_value = mock_storage_instance
+                
+                mock_discovery_instance = Mock()
+                mock_discovery_instance.create_date_range_facets.return_value = []  # No new facets created
+                mock_discovery_instance.discover_facet_content.return_value = 100
+                mock_discovery.return_value = mock_discovery_instance
+                
+                # Run with auto-discover enabled
+                result = self.runner.invoke(cli, [
+                    'setup-download-workflow',
+                    '--start-year', '1900',
+                    '--end-year', '1901', 
+                    '--auto-discover'
+                ], input='y\n')
+                
+                # Verify it queries for both pending and discovering facets
+                mock_storage_instance.get_search_facets.assert_called_with(status=['pending', 'discovering'])
+                
+                assert result.exit_code == 0
+                assert "Found 2" in result.output
+
     def test_auto_discover_facets_no_pending_facets(self):
         """Test auto-discover-facets when no pending facets exist."""
         with patch('newsagger.cli.Config') as mock_config:
@@ -475,6 +522,49 @@ class TestCLI:
                 
                 assert result.exit_code == 0
                 assert "No pending facets found" in result.output
+
+    def test_auto_discover_facets_includes_discovering_status(self):
+        """Test that auto-discover-facets includes facets with 'discovering' status for proper resume."""
+        with patch('newsagger.cli.Config') as mock_config:
+            mock_config_instance = Mock()
+            mock_config_instance.get_api_config.return_value = {'base_url': 'test'}
+            mock_config_instance.get_storage_config.return_value = {'db_path': ':memory:'}
+            mock_config.return_value = mock_config_instance
+            
+            with patch('newsagger.cli.NewsStorage') as mock_storage, \
+                 patch('newsagger.cli.LocApiClient') as mock_client, \
+                 patch('newsagger.cli.NewsDataProcessor') as mock_processor, \
+                 patch('newsagger.cli.DiscoveryManager') as mock_discovery:
+                
+                # Mock storage to return both pending and discovering facets
+                mock_storage_instance = Mock()
+                mock_storage_instance.get_search_facets.return_value = [
+                    {'id': 1, 'facet_type': 'date_range', 'facet_value': '1900/1900', 'status': 'discovering', 'items_discovered': 38400},
+                    {'id': 2, 'facet_type': 'date_range', 'facet_value': '1901/1901', 'status': 'pending', 'items_discovered': 0}
+                ]
+                mock_storage_instance.get_discovery_stats.return_value = {
+                    'completed_facets': 0, 'total_facets': 2, 'discovered_items': 38400
+                }
+                mock_storage.return_value = mock_storage_instance
+                
+                # Mock other dependencies
+                mock_client.return_value = Mock()
+                mock_processor.return_value = Mock()
+                
+                mock_discovery_instance = Mock()
+                mock_discovery_instance.discover_facet_content.return_value = 100
+                mock_discovery.return_value = mock_discovery_instance
+                
+                # Run with auto-accept
+                result = self.runner.invoke(cli, ['auto-discover-facets'], input='y\n')
+                
+                # Verify it includes both pending and discovering facets
+                mock_storage_instance.get_search_facets.assert_called_with(status=['pending', 'discovering'])
+                
+                # Should process both facets (discovering and pending)
+                assert result.exit_code == 0
+                assert "Found 2" in result.output  # "Found 2 pending facets to discover"
+                assert mock_discovery_instance.discover_facet_content.call_count == 2
 
     def test_auto_enqueue_no_discovered_content(self):
         """Test auto-enqueue when no discovered content exists."""
