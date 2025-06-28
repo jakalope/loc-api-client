@@ -729,7 +729,8 @@ def auto_discover_facets(auto_enqueue, batch_size, max_items, skip_errors, timeo
         click.echo("   Continuing with discovery...")
     
     # Calculate estimated API calls and warn about rate limiting
-    facets = storage.get_search_facets(status=['pending', 'discovering'])
+    # Include captcha_retry facets that are ready for retry
+    facets = storage.get_search_facets(status=['pending', 'discovering', 'captcha_retry'])
     if not facets:
         click.echo("✅ No pending facets found. Create facets first with 'create-facets' command.")
         return
@@ -759,6 +760,34 @@ def auto_discover_facets(auto_enqueue, batch_size, max_items, skip_errors, timeo
         with tqdm(desc="Auto-discovering", total=len(facets)) as main_pbar:
             for i, facet in enumerate(facets):
                 main_pbar.set_description(f"Discovering {facet['facet_type']}: {facet['facet_value']}")
+                
+                # Check if this is a captcha_retry facet that needs time checking
+                if facet.get('status') == 'captcha_retry':
+                    # Parse retry time from error message (simple approach for now)
+                    error_message = facet.get('error_message', '')
+                    import time
+                    import re
+                    
+                    # Look for "Retry after: <timestamp>" pattern  
+                    retry_match = re.search(r'Retry after: (.+?)(?:\.|\n|$)', error_message)
+                    if retry_match:
+                        try:
+                            retry_time_str = retry_match.group(1).strip()
+                            retry_time = time.mktime(time.strptime(retry_time_str, '%a %b %d %H:%M:%S %Y'))
+                            current_time = time.time()
+                            
+                            if current_time < retry_time:
+                                # Still in cooling-off period
+                                remaining_minutes = (retry_time - current_time) / 60
+                                click.echo(f"⏳ Skipping facet {facet['id']} ({facet['facet_value']}) - cooling-off period ({remaining_minutes:.1f} minutes remaining)")
+                                main_pbar.update(1)
+                                continue
+                            else:
+                                click.echo(f"🔄 Retrying facet {facet['id']} ({facet['facet_value']}) - cooling-off period completed")
+                        except Exception as e:
+                            click.echo(f"⚠️  Could not parse retry time for facet {facet['id']}, proceeding with retry")
+                    else:
+                        click.echo(f"🔄 Retrying facet {facet['id']} ({facet['facet_value']}) - no retry time specified")
                 
                 # Initialize nested progress bar for this facet
                 batch_pbar = None
@@ -1501,7 +1530,7 @@ def setup_download_workflow(start_year, end_year, states, auto_discover, auto_en
         if auto_discover:
             # Step 3: Auto-discover content with rate-limiting safe settings
             click.echo(f"\n🔍 Step 3: Auto-discovering content...")
-            facets = storage.get_search_facets(status=['pending', 'discovering'])
+            facets = storage.get_search_facets(status=['pending', 'discovering', 'captcha_retry'])
             
             # Estimate API calls and warn if too many
             estimated_api_calls = len(facets) * 5  # Conservative estimate
