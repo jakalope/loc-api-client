@@ -716,7 +716,7 @@ def auto_discover_facets(auto_enqueue, batch_size, max_items, skip_errors, timeo
     click.echo("🔍 Starting systematic facet discovery...")
     
     # Calculate estimated API calls and warn about rate limiting
-    facets = storage.get_search_facets(status='pending')
+    facets = storage.get_search_facets(status=['pending', 'discovering'])
     if not facets:
         click.echo("✅ No pending facets found. Create facets first with 'create-facets' command.")
         return
@@ -1488,7 +1488,7 @@ def setup_download_workflow(start_year, end_year, states, auto_discover, auto_en
         if auto_discover:
             # Step 3: Auto-discover content with rate-limiting safe settings
             click.echo(f"\n🔍 Step 3: Auto-discovering content...")
-            facets = storage.get_search_facets(status='pending')
+            facets = storage.get_search_facets(status=['pending', 'discovering'])
             
             # Estimate API calls and warn if too many
             estimated_api_calls = len(facets) * 5  # Conservative estimate
