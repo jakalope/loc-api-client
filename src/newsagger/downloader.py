@@ -18,6 +18,7 @@ import mimetypes
 
 from .storage import NewsStorage
 from .rate_limited_client import LocApiClient
+from .utils import retry_on_network_failure
 
 
 class DownloadProcessor:
@@ -355,6 +356,40 @@ class DownloadProcessor:
             'total_pages': len(undownloaded_pages)
         }
     
+    @retry_on_network_failure(max_attempts=3, base_delay=2.0)
+    def _perform_http_download(self, url: str, local_path: Path) -> int:
+        """
+        Perform the actual HTTP download with retry logic.
+        Returns the number of bytes downloaded.
+        Raises exceptions on failure (to be caught by retry decorator).
+        """
+        # Use the same rate limiting as the API client
+        time.sleep(self.api_client.request_delay)
+        
+        # Download with streaming to handle large files
+        response = self.session.get(url, stream=True, timeout=120)
+        response.raise_for_status()
+        
+        # Get file size from headers
+        total_size = int(response.headers.get('content-length', 0))
+        
+        # Write file with progress tracking
+        downloaded_size = 0
+        with open(local_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+                    downloaded_size += len(chunk)
+        
+        # Verify download
+        if total_size > 0 and downloaded_size != total_size:
+            local_path.unlink()  # Remove incomplete file
+            raise requests.exceptions.RequestException(
+                f"Download incomplete: {downloaded_size}/{total_size} bytes"
+            )
+        
+        return downloaded_size
+
     def _download_file(self, url: str, local_path: Path) -> Dict:
         """Download a single file from URL to local path."""
         try:
@@ -368,32 +403,8 @@ class DownloadProcessor:
                     'skipped': True
                 }
             
-            # Use the same rate limiting as the API client
-            time.sleep(self.api_client.request_delay)
-            
-            # Download with streaming to handle large files
-            response = self.session.get(url, stream=True, timeout=120)
-            response.raise_for_status()
-            
-            # Get file size from headers
-            total_size = int(response.headers.get('content-length', 0))
-            
-            # Write file with progress tracking
-            downloaded_size = 0
-            with open(local_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded_size += len(chunk)
-            
-            # Verify download
-            if total_size > 0 and downloaded_size != total_size:
-                local_path.unlink()  # Remove incomplete file
-                return {
-                    'success': False,
-                    'error': f"Download incomplete: {downloaded_size}/{total_size} bytes"
-                }
-            
+            # Perform download with retry logic
+            downloaded_size = self._perform_http_download(url, local_path)
             size_mb = downloaded_size / (1024 * 1024)
             
             return {

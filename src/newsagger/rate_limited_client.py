@@ -17,6 +17,8 @@ from queue import Queue, Empty
 import atexit
 import random
 
+from .utils import retry_on_network_failure
+
 
 class GlobalCaptchaManager:
     """
