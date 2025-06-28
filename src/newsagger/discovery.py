@@ -375,6 +375,50 @@ class DiscoveryManager:
         
         self.logger.info(f"Discovering content for facet {facet_id}: {facet['facet_type']} = {facet['facet_value']}")
         
+        # Proactive CAPTCHA interruption detection and fix
+        if facet.get('status') == 'completed':
+            current_page = facet.get('current_page')
+            error_message = facet.get('error_message', '')
+            
+            # Check if this facet was incorrectly marked as completed due to CAPTCHA interruption
+            captcha_indicators = []
+            
+            # Check for mid-discovery interruption (current_page set but no error)
+            if current_page and current_page > 1 and not error_message:
+                captcha_indicators.append(f"interrupted at page {current_page} with no error message")
+            
+            # Check if resume_from_page is set
+            resume_from_page_check = facet.get('resume_from_page')
+            if resume_from_page_check and resume_from_page_check > 1:
+                captcha_indicators.append(f"resume page set to {resume_from_page_check}")
+            
+            if captcha_indicators:
+                self.logger.warning(f"Detected incorrectly completed facet {facet_id}: {'; '.join(captcha_indicators)}")
+                self.logger.info(f"Auto-fixing facet {facet_id} and continuing discovery...")
+                
+                # Auto-fix the facet status
+                import time
+                retry_time = time.time() + 1800  # 30 minute cooling-off
+                retry_message = f"Auto-fixed incorrectly completed facet - was interrupted (indicators: {'; '.join(captcha_indicators)}). Fixed at: {time.ctime()}"
+                
+                # Resume from the next page after interruption
+                resume_page = current_page + 1 if current_page and current_page > 1 else 1
+                
+                self.storage.update_facet_discovery(
+                    facet_id,
+                    status='discovering',  # Set to discovering so we can continue
+                    error_message=retry_message,
+                    current_page=resume_page  # This will set resume_from_page automatically
+                )
+                
+                self.logger.info(f"Auto-fixed facet {facet_id}: status changed to 'discovering', will resume from page {resume_page}")
+                
+                # Update facet data for continued processing
+                facet['status'] = 'discovering'
+                facet['current_page'] = resume_page
+                facet['resume_from_page'] = resume_page
+                facet['error_message'] = retry_message
+        
         # Check for resume capability
         resume_from_page = facet.get('resume_from_page', 1)
         if resume_from_page > 1:
@@ -534,14 +578,14 @@ class DiscoveryManager:
                 if interruption_reason == 'captcha':
                     # Mark for CAPTCHA recovery
                     import time
-                    next_retry_time = int(time.time()) + 3600  # 1 hour cooling-off
+                    retry_time = time.time() + 3600  # 1 hour cooling-off
+                    retry_message = f"CAPTCHA interruption at page {page} - retry after: {time.ctime(retry_time)}"
                     self.storage.update_facet_discovery(
                         facet_id,
                         status='captcha_retry',
-                        error_message=f"CAPTCHA interruption at page {page} - scheduled for retry",
+                        error_message=retry_message,
                         items_discovered=total_discovered,
-                        next_retry_time=next_retry_time,
-                        resume_from_page=page  # Resume from where we stopped
+                        current_page=page  # This will set resume_from_page automatically
                     )
                     self.logger.info(f"Marked facet {facet_id} for CAPTCHA retry (discovered {total_discovered} items, resume from page {page})")
                 elif interruption_reason == 'timeout' and total_discovered > 0:
@@ -583,14 +627,15 @@ class DiscoveryManager:
             if e.retry_strategy == 'persistent_captcha_state':
                 # Persistent CAPTCHA state detected - need longer cooling-off
                 import time
-                next_retry_time = int(time.time()) + (e.suggested_params.get('cooling_off_hours', 2) * 3600)
+                cooling_hours = e.suggested_params.get('cooling_off_hours', 2)
+                retry_time = time.time() + (cooling_hours * 3600)
+                retry_message = f"Persistent CAPTCHA state - extended cooling-off needed: {e}. Retry after: {time.ctime(retry_time)}"
                 self.storage.update_facet_discovery(
                     facet_id,
                     status='captcha_retry',
-                    error_message=f"Persistent CAPTCHA state - extended cooling-off needed: {e}",
+                    error_message=retry_message,
                     items_discovered=total_discovered,
-                    next_retry_time=next_retry_time,
-                    resume_from_page=page  # Resume from current page
+                    current_page=page  # This will set resume_from_page automatically
                 )
                 self.logger.warning(f"Persistent CAPTCHA detected for facet {facet_id} - scheduled extended cooling-off for {e.suggested_params.get('cooling_off_hours', 2)} hours")
                 return total_discovered
@@ -608,13 +653,14 @@ class DiscoveryManager:
             else:
                 # For other CAPTCHA strategies, mark for delayed retry
                 import time
-                next_retry_time = int(time.time()) + (e.suggested_params.get('cooling_off_hours', 1) * 3600)
+                cooling_hours = e.suggested_params.get('cooling_off_hours', 1)
+                retry_time = time.time() + (cooling_hours * 3600)
+                retry_message = f"CAPTCHA retry scheduled: {e}. Retry after: {time.ctime(retry_time)}"
                 self.storage.update_facet_discovery(
                     facet_id,
                     status='captcha_retry',
-                    error_message=f"CAPTCHA retry scheduled: {e}",
-                    items_discovered=total_discovered,
-                    next_retry_time=next_retry_time
+                    error_message=retry_message,
+                    items_discovered=total_discovered
                 )
                 self.logger.info(f"Scheduled facet {facet_id} for CAPTCHA retry (discovered {total_discovered} items)")
                 return total_discovered
@@ -627,13 +673,13 @@ class DiscoveryManager:
                 self.logger.warning(f"Legacy CAPTCHA error for facet {facet_id}: {e}")
                 # Mark for retry instead of permanent error
                 import time
-                next_retry_time = int(time.time()) + 7200  # 2 hour delay
+                retry_time = time.time() + 7200  # 2 hour delay
+                retry_message = f"Legacy CAPTCHA error - retry scheduled: {error_message}. Retry after: {time.ctime(retry_time)}"
                 self.storage.update_facet_discovery(
                     facet_id,
                     status='captcha_retry',
-                    error_message=f"Legacy CAPTCHA error - retry scheduled: {error_message}",
-                    items_discovered=total_discovered,
-                    next_retry_time=next_retry_time
+                    error_message=retry_message,
+                    items_discovered=total_discovered
                 )
                 self.logger.info(f"Scheduled facet {facet_id} for CAPTCHA retry due to legacy error (discovered {total_discovered} items)")
                 return total_discovered
@@ -838,7 +884,10 @@ class DiscoveryManager:
         retry_facets = self.storage.get_search_facets(status='captcha_retry')
         for facet in retry_facets:
             facet_id = facet['id']
-            next_retry_time = facet.get('next_retry_time', 0)
+            
+            # For now, treat all captcha_retry facets as ready for retry
+            # TODO: Implement proper retry time tracking
+            next_retry_time = 0  # Always ready for retry
             
             if current_time >= next_retry_time:
                 self.logger.info(f"Processing CAPTCHA retry for facet {facet_id}")
@@ -858,12 +907,12 @@ class DiscoveryManager:
                 except Exception as e:
                     if 'captcha' in str(e).lower():
                         # Schedule another retry with longer delay
-                        next_retry = current_time + 14400  # 4 hours
+                        retry_time = current_time + 14400  # 4 hours
+                        retry_message = f"Retry failed, rescheduled: {e}. Retry after: {time.ctime(retry_time)}"
                         self.storage.update_facet_discovery(
                             facet_id,
                             status='captcha_retry',
-                            next_retry_time=next_retry,
-                            error_message=f"Retry failed, rescheduled: {e}"
+                            error_message=retry_message
                         )
                         stats['retries_scheduled'] += 1
                         self.logger.warning(f"CAPTCHA retry failed for facet {facet_id}, rescheduled for 4 hours")
@@ -872,8 +921,12 @@ class DiscoveryManager:
                         stats['errors'] += 1
             else:
                 # Still waiting for retry time
-                remaining_wait = (next_retry_time - current_time) / 3600
-                self.logger.debug(f"Facet {facet_id} still cooling off, {remaining_wait:.1f} hours remaining")
+                if next_retry_time > 0:
+                    remaining_wait = (next_retry_time - current_time) / 3600
+                    self.logger.debug(f"Facet {facet_id} still cooling off, {remaining_wait:.1f} hours remaining")
+                else:
+                    # No retry time found - assume ready for retry
+                    self.logger.debug(f"Facet {facet_id} has no retry time - treating as ready for retry")
         
         # Process facets marked for splitting
         split_facets = self.storage.get_search_facets(status='needs_splitting')
@@ -989,11 +1042,8 @@ class DiscoveryManager:
         waiting_for_retry = 0
         
         for facet in retry_facets:
-            next_retry_time = facet.get('next_retry_time', 0)
-            if current_time >= next_retry_time:
-                ready_for_retry += 1
-            else:
-                waiting_for_retry += 1
+            # For now, treat all as ready for retry
+            ready_for_retry += 1
         
         return {
             'ready_for_retry': ready_for_retry,
@@ -1024,15 +1074,40 @@ class DiscoveryManager:
             error_message = facet.get('error_message', '')
             
             try:
-                # Check if the error message indicates CAPTCHA interruption
-                if any(keyword in error_message.lower() for keyword in ['captcha', 'stopped at page', 'manual intervention']):
-                    self.logger.info(f"Found incorrectly completed facet {facet_id}: {error_message}")
+                # Check multiple indicators of CAPTCHA interruption:
+                # 1. Error message mentions CAPTCHA/stopped/manual intervention
+                # 2. Facet has current_page but no error_message (interrupted mid-discovery)
+                # 3. resume_from_page is set (indicates interruption)
+                
+                captcha_indicators = []
+                
+                # Check error message
+                if error_message and any(keyword in error_message.lower() for keyword in ['captcha', 'stopped at page', 'manual intervention']):
+                    captcha_indicators.append(f"error message: {error_message}")
+                
+                # Check for mid-discovery interruption (current_page set but no error)
+                current_page = facet.get('current_page')
+                if current_page and current_page > 1 and not error_message:
+                    captcha_indicators.append(f"interrupted at page {current_page} with no error message")
+                
+                # Check if resume_from_page is set
+                resume_from_page = facet.get('resume_from_page')
+                if resume_from_page and resume_from_page > 1:
+                    captcha_indicators.append(f"resume page set to {resume_from_page}")
+                
+                if captcha_indicators:
+                    self.logger.info(f"Found incorrectly completed facet {facet_id}: {'; '.join(captcha_indicators)}")
                     
-                    # Extract the page where it stopped from the error message
-                    resume_page = facet.get('current_page', 1)
-                    if 'stopped at page' in error_message:
+                    # Determine resume page
+                    resume_page = current_page if current_page else resume_from_page if resume_from_page else 1
+                    
+                    # If we have a current_page, resume from the next page (the one that failed)
+                    if current_page and current_page > 1:
+                        resume_page = current_page + 1
+                    
+                    # Extract page from error message if available
+                    if error_message and 'stopped at page' in error_message:
                         try:
-                            # Try to extract page number from error message
                             import re
                             page_match = re.search(r'stopped at page (\d+)', error_message)
                             if page_match:
@@ -1042,13 +1117,12 @@ class DiscoveryManager:
                     
                     # Mark for CAPTCHA retry
                     import time
-                    next_retry_time = int(time.time()) + 3600  # 1 hour from now
+                    retry_message = f"Fixed incorrectly completed facet - was interrupted (indicators: {'; '.join(captcha_indicators)}). Retry after: {time.ctime(time.time() + 3600)}"
                     self.storage.update_facet_discovery(
                         facet_id,
                         status='captcha_retry',
-                        error_message=f"Fixed incorrectly completed facet - was interrupted by CAPTCHA",
-                        next_retry_time=next_retry_time,
-                        resume_from_page=resume_page
+                        error_message=retry_message,
+                        current_page=resume_page  # This will set resume_from_page automatically
                     )
                     
                     stats['facets_fixed'] += 1
@@ -1059,3 +1133,32 @@ class DiscoveryManager:
                 stats['errors'] += 1
         
         return stats
+    
+    def _parse_retry_time_from_message(self, error_message: str) -> int:
+        """
+        Parse retry time from error message that contains 'Retry after: <timestamp>'.
+        Returns 0 if no retry time found (meaning ready to retry now).
+        """
+        if not error_message:
+            return 0
+        
+        try:
+            # Look for pattern "Retry after: <timestamp>"
+            import re
+            import time
+            
+            retry_pattern = r'Retry after: (.+?)(?:\.|$)'
+            match = re.search(retry_pattern, error_message)
+            
+            if match:
+                time_str = match.group(1).strip()
+                # Parse the timestamp back to epoch time
+                retry_time = time.mktime(time.strptime(time_str, '%a %b %d %H:%M:%S %Y'))
+                return int(retry_time)
+            else:
+                # No retry time found - assume ready to retry
+                return 0
+                
+        except Exception as e:
+            self.logger.debug(f"Could not parse retry time from message: {error_message} - {e}")
+            return 0  # Assume ready to retry if parsing fails

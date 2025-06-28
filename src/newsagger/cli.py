@@ -715,6 +715,19 @@ def auto_discover_facets(auto_enqueue, batch_size, max_items, skip_errors, timeo
     
     click.echo("🔍 Starting systematic facet discovery...")
     
+    # Proactive CAPTCHA interruption detection and fix
+    click.echo("🛠️  Checking for incorrectly completed facets...")
+    try:
+        fix_stats = discovery.fix_incorrectly_completed_facets()
+        if fix_stats['facets_fixed'] > 0:
+            click.echo(f"✅ Auto-fixed {fix_stats['facets_fixed']} incorrectly completed facets")
+            click.echo(f"   These facets will now resume from where they were interrupted")
+        else:
+            click.echo("✅ No incorrectly completed facets found")
+    except Exception as e:
+        click.echo(f"⚠️  Error during facet checking: {e}")
+        click.echo("   Continuing with discovery...")
+    
     # Calculate estimated API calls and warn about rate limiting
     facets = storage.get_search_facets(status=['pending', 'discovering'])
     if not facets:
@@ -1512,6 +1525,17 @@ def setup_download_workflow(start_year, end_year, states, auto_discover, auto_en
                 start_time = time.time()
                 total_discovered = 0
                 errors = 0
+                
+                # Proactive CAPTCHA interruption detection and fix
+                click.echo(f"   🛠️  Checking for incorrectly completed facets...")
+                try:
+                    fix_stats = discovery.fix_incorrectly_completed_facets()
+                    if fix_stats['facets_fixed'] > 0:
+                        click.echo(f"   ✅ Auto-fixed {fix_stats['facets_fixed']} incorrectly completed facets")
+                    else:
+                        click.echo(f"   ✅ No incorrectly completed facets found")
+                except Exception as e:
+                    click.echo(f"   ⚠️  Error during facet checking: {e}")
                 
                 click.echo(f"   🚀 Starting discovery of {len(facets)} facets...")
                 click.echo(f"   ⏱️  Started at: {time.strftime('%H:%M:%S')}")
