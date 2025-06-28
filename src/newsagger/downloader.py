@@ -18,7 +18,7 @@ import mimetypes
 
 from .storage import NewsStorage
 from .rate_limited_client import LocApiClient
-from .utils import retry_on_network_failure
+from .utils import retry_on_network_failure, ProgressTracker
 
 
 class DownloadProcessor:
@@ -82,16 +82,11 @@ class DownloadProcessor:
                 "dry_run": True
             }
         
-        # Process downloads
-        stats = {
-            "downloaded": 0,
-            "errors": 0,
-            "skipped": 0,
-            "total_size_mb": 0,
-            "start_time": datetime.now()
-        }
+        # Process downloads with progress tracking
+        total_size_mb = 0
+        start_time = datetime.now()
         
-        with tqdm(total=len(queue_items), desc="Processing downloads") as pbar:
+        with ProgressTracker(total=len(queue_items), desc="Processing downloads", unit="files") as progress:
             for item in queue_items:
                 try:
                     # Mark item as active
@@ -101,8 +96,7 @@ class DownloadProcessor:
                     result = self._process_queue_item(item)
                     
                     if result['success']:
-                        stats['downloaded'] += 1
-                        stats['total_size_mb'] += result.get('size_mb', 0)
+                        total_size_mb += result.get('size_mb', 0)
                         
                         # Mark as completed
                         self.storage.update_queue_item(
@@ -110,32 +104,45 @@ class DownloadProcessor:
                             status='completed',
                             progress_percent=100.0
                         )
+                        
+                        # Update progress with custom postfix for size
+                        progress.update(success=True)
+                        progress.set_postfix(size_mb=f"{total_size_mb:.1f}")
                     else:
-                        stats['errors'] += 1
                         self.storage.update_queue_item(
                             item['id'],
                             status='failed',
                             error_message=result.get('error', 'Unknown error')
                         )
+                        
+                        progress.update(success=False)
+                        progress.set_postfix(size_mb=f"{total_size_mb:.1f}")
                     
                 except Exception as e:
                     self.logger.error(f"Error processing queue item {item['id']}: {e}")
-                    stats['errors'] += 1
                     self.storage.update_queue_item(
                         item['id'],
                         status='failed',
                         error_message=str(e)
                     )
-                
-                pbar.update(1)
-                pbar.set_postfix({
-                    'downloaded': stats['downloaded'],
-                    'errors': stats['errors'],
-                    'size_mb': f"{stats['total_size_mb']:.1f}"
-                })
+                    
+                    progress.update(success=False)
+                    progress.set_postfix(size_mb=f"{total_size_mb:.1f}")
         
-        stats['end_time'] = datetime.now()
-        stats['duration_minutes'] = (stats['end_time'] - stats['start_time']).total_seconds() / 60
+        # Get final statistics from progress tracker and build return stats
+        final_stats = progress.get_stats()
+        end_time = datetime.now()
+        
+        # Build return stats in original format for compatibility
+        stats = {
+            "downloaded": final_stats['success'],
+            "errors": final_stats['errors'],
+            "skipped": final_stats['skipped'],
+            "total_size_mb": total_size_mb,
+            "start_time": start_time,
+            "end_time": end_time,
+            "duration_minutes": (end_time - start_time).total_seconds() / 60
+        }
         
         self.logger.info(f"Download processing complete: {stats['downloaded']} downloaded, "
                         f"{stats['errors']} errors, {stats['total_size_mb']:.1f} MB total")

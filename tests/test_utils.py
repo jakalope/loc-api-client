@@ -15,7 +15,8 @@ from src.newsagger.utils import (
     retry_with_backoff,
     retry_on_request_failure,
     retry_on_network_failure,
-    DatabaseOperationMixin
+    DatabaseOperationMixin,
+    ProgressTracker
 )
 
 
@@ -520,3 +521,137 @@ class TestDatabaseOperationMixin:
                 'nonexistent_table', 'id', 1,
                 name='test'
             )
+
+
+class TestProgressTracker:
+    """Test ProgressTracker context manager."""
+    
+    def test_basic_context_manager(self):
+        """Test basic context manager functionality."""
+        with ProgressTracker(total=10, desc="Test") as tracker:
+            assert tracker.total == 10
+            assert tracker.initial_desc == "Test"
+            assert tracker._pbar is not None
+            assert tracker.stats['processed'] == 0
+    
+    def test_update_success(self):
+        """Test updating progress with successful operations."""
+        with ProgressTracker(total=5) as tracker:
+            tracker.update(count=2, success=True)
+            
+            assert tracker.stats['processed'] == 2
+            assert tracker.stats['success'] == 2
+            assert tracker.stats['errors'] == 0
+            assert tracker.stats['skipped'] == 0
+    
+    def test_update_errors(self):
+        """Test updating progress with errors."""
+        with ProgressTracker(total=5) as tracker:
+            tracker.update(count=1, success=False)
+            tracker.update(count=1, success=True)
+            
+            assert tracker.stats['processed'] == 2
+            assert tracker.stats['success'] == 1
+            assert tracker.stats['errors'] == 1
+            assert tracker.stats['skipped'] == 0
+    
+    def test_update_skipped(self):
+        """Test updating progress with skipped items."""
+        with ProgressTracker(total=5) as tracker:
+            tracker.update(count=2, skipped=True)
+            tracker.update(count=1, success=True)
+            
+            assert tracker.stats['processed'] == 3
+            assert tracker.stats['success'] == 1
+            assert tracker.stats['errors'] == 0
+            assert tracker.stats['skipped'] == 2
+    
+    def test_increment_error(self):
+        """Test incrementing error count without updating progress."""
+        with ProgressTracker(total=5) as tracker:
+            tracker.increment_error(count=2)
+            
+            assert tracker.stats['processed'] == 0  # No progress update
+            assert tracker.stats['errors'] == 2
+    
+    def test_set_description(self):
+        """Test setting custom description."""
+        with patch('src.newsagger.utils.tqdm') as mock_tqdm:
+            mock_pbar = Mock()
+            mock_tqdm.return_value = mock_pbar
+            
+            with ProgressTracker() as tracker:
+                tracker.set_description("New description")
+                mock_pbar.set_description.assert_called_once_with("New description")
+    
+    def test_set_custom_postfix(self):
+        """Test setting custom postfix information."""
+        with patch('src.newsagger.utils.tqdm') as mock_tqdm:
+            mock_pbar = Mock()
+            mock_tqdm.return_value = mock_pbar
+            
+            with ProgressTracker() as tracker:
+                tracker.set_postfix(custom="value", another=123)
+                mock_pbar.set_postfix.assert_called_with(custom="value", another=123)
+    
+    def test_get_stats(self):
+        """Test getting current statistics."""
+        with ProgressTracker(total=10) as tracker:
+            tracker.update(count=3, success=True)
+            tracker.update(count=1, success=False)
+            tracker.update(count=2, skipped=True)
+            
+            stats = tracker.get_stats()
+            
+            assert stats['processed'] == 6
+            assert stats['success'] == 3
+            assert stats['errors'] == 1
+            assert stats['skipped'] == 2
+            assert 'elapsed_seconds' in stats
+            assert stats['elapsed_seconds'] >= 0
+    
+    def test_no_rate_display(self):
+        """Test progress tracker without rate display."""
+        with patch('src.newsagger.utils.tqdm') as mock_tqdm:
+            mock_pbar = Mock()
+            mock_tqdm.return_value = mock_pbar
+            
+            with ProgressTracker(show_rate=False) as tracker:
+                tracker.update(count=1, success=True)
+                
+                # Check that postfix doesn't include rate
+                call_args = mock_pbar.set_postfix.call_args
+                if call_args:
+                    postfix_args = call_args[1] if call_args[1] else call_args[0][0] if call_args[0] else {}
+                    assert 'rate' not in str(postfix_args)
+    
+    def test_unknown_total(self):
+        """Test progress tracker with unknown total."""
+        with patch('src.newsagger.utils.tqdm') as mock_tqdm:
+            mock_pbar = Mock()
+            mock_tqdm.return_value = mock_pbar
+            
+            with ProgressTracker(total=None, desc="Unknown total") as tracker:
+                mock_tqdm.assert_called_once_with(total=None, desc="Unknown total", unit="item")
+                tracker.update(count=5)
+                assert tracker.stats['processed'] == 5
+    
+    def test_custom_unit(self):
+        """Test progress tracker with custom unit."""
+        with patch('src.newsagger.utils.tqdm') as mock_tqdm:
+            mock_pbar = Mock()
+            mock_tqdm.return_value = mock_pbar
+            
+            with ProgressTracker(unit="files") as tracker:
+                mock_tqdm.assert_called_once_with(total=None, desc="Processing", unit="files")
+    
+    def test_context_manager_cleanup(self):
+        """Test that progress bar is properly closed on exit."""
+        with patch('src.newsagger.utils.tqdm') as mock_tqdm:
+            mock_pbar = Mock()
+            mock_tqdm.return_value = mock_pbar
+            
+            with ProgressTracker() as tracker:
+                pass  # Just enter and exit
+            
+            mock_pbar.close.assert_called_once()
