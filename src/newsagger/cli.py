@@ -724,12 +724,73 @@ def auto_discover_facets(auto_enqueue, batch_size, max_items, skip_errors, timeo
         click.echo(f"🛑 DISCOVERY BLOCKED: {captcha_status['reason']}")
         click.echo(f"   Consecutive CAPTCHAs: {captcha_status['consecutive_captchas']}")
         click.echo(f"   Cooling-off period: {captcha_status['cooling_off_hours']:.1f} hours")
+        
         if captcha_status['last_captcha_time']:
             import time
             last_captcha = time.ctime(captcha_status['last_captcha_time'])
+            resume_time = captcha_status['last_captcha_time'] + (captcha_status['cooling_off_hours'] * 3600)
+            remaining_minutes = (resume_time - time.time()) / 60
+            
             click.echo(f"   Last CAPTCHA: {last_captcha}")
-        click.echo(f"\n💡 To override: python main.py reset-captcha-state")
-        return
+            click.echo(f"   Resume after: {time.ctime(resume_time)}")
+            click.echo(f"   Remaining: {remaining_minutes:.1f} minutes")
+            
+            # Offer automatic wait
+            click.echo(f"\n⏰ Wait options:")
+            click.echo(f"   1. Wait {remaining_minutes:.1f} minutes and auto-start discovery")
+            click.echo(f"   2. Override cooling-off period (risky)")
+            click.echo(f"   3. Exit and try later")
+            
+            choice = click.prompt(
+                "Choose option",
+                type=click.Choice(['1', '2', '3']),
+                default='1'
+            )
+            
+            if choice == '1':
+                # Wait automatically
+                click.echo(f"\n⏳ Waiting for cooling-off period to complete...")
+                click.echo(f"   Press Ctrl+C to abort")
+                
+                try:
+                    cooling_off_seconds = remaining_minutes * 60
+                    start_wait = time.time()
+                    
+                    with tqdm(desc="Cooling-off", total=int(cooling_off_seconds), unit="s") as wait_pbar:
+                        while time.time() < resume_time:
+                            current_time = time.time()
+                            elapsed = current_time - start_wait
+                            remaining = resume_time - current_time
+                            
+                            wait_pbar.n = int(elapsed)
+                            wait_pbar.set_postfix(remaining=f"{remaining/60:.1f}m")
+                            wait_pbar.refresh()
+                            
+                            time.sleep(1)
+                            
+                            if remaining <= 0:
+                                break
+                    
+                    # Reset CAPTCHA state and continue
+                    global_captcha.reset_state()
+                    click.echo(f"\n✅ Cooling-off completed - starting discovery!")
+                    
+                except KeyboardInterrupt:
+                    click.echo(f"\n⚠️  Interrupted. Try again later.")
+                    return
+                    
+            elif choice == '2':
+                # Override (risky)
+                if click.confirm("⚠️  Override cooling-off? This may trigger immediate CAPTCHA again!"):
+                    global_captcha.reset_state()
+                    click.echo("✅ CAPTCHA state reset - proceeding with discovery")
+                else:
+                    click.echo("Cancelled")
+                    return
+            else:
+                # Exit
+                click.echo("💡 Try again later or use: python main.py reset-captcha-state")
+                return
     else:
         click.echo(f"✅ Global CAPTCHA status: {captcha_status['reason']}")
     
@@ -876,22 +937,24 @@ def auto_discover_facets(auto_enqueue, batch_size, max_items, skip_errors, timeo
                         main_pbar.set_postfix(discovered=total_discovered, errors=errors_count)
                 
                 except CaptchaHandlingException as e:
-                    # Handle global CAPTCHA - stop all discovery
+                    # Handle global CAPTCHA - automatically wait and resume
                     if hasattr(signal, 'SIGALRM'):
                         signal.alarm(0)
                     if batch_pbar:
                         batch_pbar.close()
                     
-                    click.echo(f"\n🛑 GLOBAL CAPTCHA DETECTED - Stopping all discovery operations")
+                    click.echo(f"\n🛑 GLOBAL CAPTCHA DETECTED - Initiating automatic wait-and-resume")
                     click.echo(f"   Facet {facet['id']} ({facet['facet_value']}) triggered CAPTCHA protection")
                     
                     captcha_status = global_captcha.get_status()
+                    cooling_off_seconds = captcha_status['cooling_off_hours'] * 3600
+                    
                     click.echo(f"   Global cooling-off: {captcha_status['cooling_off_hours']:.1f} hours")
                     click.echo(f"   Consecutive CAPTCHAs: {captcha_status['consecutive_captchas']}")
                     
                     if captcha_status['last_captcha_time']:
                         import time
-                        resume_time = captcha_status['last_captcha_time'] + (captcha_status['cooling_off_hours'] * 3600)
+                        resume_time = captcha_status['last_captcha_time'] + cooling_off_seconds
                         click.echo(f"   Resume after: {time.ctime(resume_time)}")
                     
                     click.echo(f"\n📊 Progress before CAPTCHA:")
@@ -900,8 +963,54 @@ def auto_discover_facets(auto_enqueue, batch_size, max_items, skip_errors, timeo
                     if auto_enqueue:
                         click.echo(f"   Items enqueued: {total_enqueued:,}")
                     
-                    click.echo(f"\n💡 Resume later with: python main.py auto-discover-facets")
-                    break  # Stop all discovery operations
+                    # Ask user if they want to wait automatically
+                    click.echo(f"\n⏰ Automatic wait options:")
+                    click.echo(f"   1. Wait {captcha_status['cooling_off_hours']:.1f} hours and auto-resume")
+                    click.echo(f"   2. Exit now and resume manually later")
+                    
+                    if click.confirm(f"\nWait {captcha_status['cooling_off_hours']:.1f} hours and auto-resume discovery?", default=True):
+                        # Automatic wait and resume
+                        click.echo(f"\n⏳ Waiting for cooling-off period...")
+                        click.echo(f"   Discovery will automatically resume at: {time.ctime(resume_time)}")
+                        click.echo(f"   Press Ctrl+C to abort and exit")
+                        
+                        try:
+                            # Wait with progress updates
+                            import time
+                            start_wait = time.time()
+                            
+                            with tqdm(desc="Cooling-off", total=int(cooling_off_seconds), unit="s") as wait_pbar:
+                                while time.time() < resume_time:
+                                    current_time = time.time()
+                                    elapsed = current_time - start_wait
+                                    remaining = resume_time - current_time
+                                    
+                                    wait_pbar.n = int(elapsed)
+                                    wait_pbar.set_postfix(remaining=f"{remaining/60:.1f}m")
+                                    wait_pbar.refresh()
+                                    
+                                    time.sleep(1)  # Update every second
+                                    
+                                    # Check for user interrupt
+                                    if remaining <= 0:
+                                        break
+                            
+                            # Reset global CAPTCHA state
+                            global_captcha.reset_state()
+                            click.echo(f"\n✅ Cooling-off period completed - resuming discovery!")
+                            click.echo(f"   Continuing from facet {i + 1} of {len(facets)}")
+                            
+                            # Continue the discovery loop (don't break)
+                            main_pbar.set_description("Resuming after CAPTCHA")
+                            continue
+                            
+                        except KeyboardInterrupt:
+                            click.echo(f"\n\n⚠️  Discovery interrupted by user during cooling-off")
+                            click.echo(f"   Progress saved. Resume later with: python main.py auto-discover-facets")
+                            break
+                    else:
+                        click.echo(f"\n💡 Exiting. Resume later with: python main.py auto-discover-facets")
+                        break  # Exit discovery
                 
                 except (TimeoutError, Exception) as e:
                     # Cancel the timeout
