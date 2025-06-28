@@ -21,8 +21,8 @@ class RateLimitedRequestManager:
     """
     Singleton class that manages all API requests with centralized rate limiting.
     
-    Ensures that no more than 18 requests per minute are made to respect
-    LOC's 20 requests/minute limit with a safety buffer.
+    Ensures that no more than 12 requests per minute are made to respect
+    LOC's 20 requests/minute limit with a conservative safety buffer.
     """
     
     _instance = None
@@ -37,7 +37,7 @@ class RateLimitedRequestManager:
         return cls._instance
     
     def __init__(self, base_url: str = "https://chroniclingamerica.loc.gov/", 
-                 max_requests_per_minute: int = 18, max_retries: int = 3):
+                 max_requests_per_minute: int = 12, max_retries: int = 3):
         # Only initialize once (singleton pattern)
         if hasattr(self, '_initialized'):
             return
@@ -204,7 +204,7 @@ class LocApiClient:
         # Get the singleton rate limiter
         self.rate_limiter = RateLimitedRequestManager(
             base_url=base_url,
-            max_requests_per_minute=18,  # Conservative limit
+            max_requests_per_minute=12,  # More conservative limit to avoid 429s
             max_retries=max_retries
         )
         self.logger = logging.getLogger(__name__)
