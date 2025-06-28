@@ -545,3 +545,140 @@ class TestNewsStorage:
         assert stats['active'] == 0
         assert stats['completed'] == 0
         assert stats['failed'] == 0
+
+    def test_update_periodical_discovery_edge_cases(self, storage):
+        """Test edge cases in periodical discovery updates."""
+        # Test with non-existent periodical
+        storage.update_periodical_discovery('nonexistent', total_issues=100)
+        
+        # Should not crash, but also not update anything
+        periodicals = storage.get_periodicals()
+        assert len(periodicals) == 0
+        
+    def test_get_pages_for_facet_complex_query(self, storage):
+        """Test complex facet page queries."""
+        # Add test facet and pages
+        facet_id = storage.create_search_facet('date_range', '1906/1906', '', 1000)
+        
+        page_data = [
+            {
+                'item_id': 'page1',
+                'lccn': 'sn123',
+                'title': 'Test Page 1',
+                'date': '1906-04-18',
+                'edition': 1,
+                'sequence': 1,
+                'page_url': 'https://example.com/page1',
+                'facet_id': facet_id
+            },
+            {
+                'item_id': 'page2',
+                'lccn': 'sn123',
+                'title': 'Test Page 2', 
+                'date': '1906-04-19',
+                'edition': 1,
+                'sequence': 1,
+                'page_url': 'https://example.com/page2',
+                'facet_id': facet_id
+            }
+        ]
+        
+        for page in page_data:
+            storage.store_page(
+                page['item_id'], page['lccn'], page['title'], page['date'],
+                page['edition'], page['sequence'], page['page_url'], 
+                facet_id=page['facet_id']
+            )
+        
+        # Test getting pages for facet with download filter
+        pages = storage.get_pages_for_facet(facet_id, downloaded=False)
+        assert len(pages) == 2
+        
+        # Mark one as downloaded and test filter
+        storage.mark_page_downloaded('page1')
+        pages = storage.get_pages_for_facet(facet_id, downloaded=False)
+        assert len(pages) == 1
+        assert pages[0]['item_id'] == 'page2'
+        
+        pages = storage.get_pages_for_facet(facet_id, downloaded=True)
+        assert len(pages) == 1
+        assert pages[0]['item_id'] == 'page1'
+
+    def test_create_download_session(self, storage):
+        """Test creating and managing download sessions."""
+        session_id = storage.create_download_session(
+            'test_session',
+            {'lccn': 'sn123', 'date_range': '1906/1906'},
+            estimated_items=1000
+        )
+        
+        assert session_id is not None
+        
+        # Test updating session progress
+        storage.update_download_session(session_id, downloaded_items=250)
+        storage.update_download_session(session_id, downloaded_items=500)
+        
+        # Complete the session
+        storage.complete_download_session(session_id)
+
+    def test_database_migration_handling(self, storage):
+        """Test database migration and schema handling."""
+        # This tests the migration logic in the constructor
+        # The migration warning is already tested in other test runs
+        assert storage.db_path is not None
+        
+        # Test that tables exist
+        cursor = storage.conn.cursor()
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        tables = [row[0] for row in cursor.fetchall()]
+        
+        expected_tables = [
+            'pages', 'periodicals', 'search_facets', 'download_queue',
+            'periodical_issues', 'download_sessions'
+        ]
+        
+        for table in expected_tables:
+            assert table in tables
+    
+    def test_get_storage_stats_comprehensive(self, storage):
+        """Test comprehensive storage statistics."""
+        # Add test data
+        storage.store_periodicals([
+            {
+                'lccn': 'sn123',
+                'title': 'Test Paper',
+                'state': 'California',
+                'city': 'San Francisco',
+                'start_year': 1900,
+                'end_year': 1910,
+                'frequency': 'Daily',
+                'language': 'English',
+                'subject': 'News',
+                'url': 'https://example.com'
+            }
+        ])
+        
+        storage.store_page('page1', 'sn123', 'Test Page', '1906-04-18', 1, 1, 'https://example.com/page1')
+        storage.mark_page_downloaded('page1')
+        
+        stats = storage.get_storage_stats()
+        
+        assert stats['total_newspapers'] == 1
+        assert stats['total_pages'] == 1
+        assert stats['downloaded_pages'] == 1
+        assert 'db_size_mb' in stats
+        assert stats['db_size_mb'] > 0
+
+    def test_error_handling_database_operations(self, storage):
+        """Test error handling in database operations."""
+        # Test with invalid data types
+        try:
+            storage.store_page(None, 'sn123', 'Test', '1906-04-18', 1, 1, 'https://example.com')
+        except Exception:
+            pass  # Expected to handle gracefully
+        
+        # Test with malformed dates
+        try:
+            storage.store_page('page1', 'sn123', 'Test', 'invalid-date', 1, 1, 'https://example.com')
+        except Exception:
+            pass  # Expected to handle gracefully

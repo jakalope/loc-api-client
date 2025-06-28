@@ -301,3 +301,102 @@ class TestLocApiClient:
         assert len(newspapers) == 2
         assert newspapers[0]['lccn'] == 'test1'
         assert newspapers[1]['lccn'] == 'test2'
+
+    @responses.activate
+    def test_search_pages_network_error(self):
+        """Test search_pages with network error."""
+        responses.add(
+            responses.GET,
+            'https://chroniclingamerica.loc.gov/search/pages/results/',
+            body=requests.exceptions.ConnectionError("Network error")
+        )
+        
+        client = LocApiClient(request_delay=0.1, max_retries=1)
+        
+        with pytest.raises(requests.exceptions.ConnectionError):
+            client.search_pages(andtext='test')
+    
+    @responses.activate
+    def test_search_pages_http_error(self):
+        """Test search_pages with HTTP error."""
+        responses.add(
+            responses.GET,
+            'https://chroniclingamerica.loc.gov/search/pages/results/',
+            status=500
+        )
+        
+        client = LocApiClient(request_delay=0.1, max_retries=1)
+        
+        with pytest.raises(requests.exceptions.HTTPError):
+            client.search_pages(andtext='test')
+    
+    @responses.activate
+    def test_get_newspaper_issues_error(self):
+        """Test get_newspaper_issues with API error."""
+        responses.add(
+            responses.GET,
+            'https://chroniclingamerica.loc.gov/lccn/invalid.json',
+            status=404
+        )
+        
+        client = LocApiClient(request_delay=0.1)
+        
+        with pytest.raises(requests.exceptions.HTTPError):
+            client.get_newspaper_issues('invalid')
+    
+    @responses.activate
+    def test_get_page_metadata_error(self):
+        """Test get_page_metadata with invalid parameters."""
+        responses.add(
+            responses.GET,
+            'https://chroniclingamerica.loc.gov/lccn/sn123/issues/1906-04-18/ed-1/seq-999.json',
+            status=404
+        )
+        
+        client = LocApiClient(request_delay=0.1)
+        
+        with pytest.raises(requests.exceptions.HTTPError):
+            client.get_page_metadata('sn123', '1906-04-18', 1, 999)
+    
+    def test_format_search_date_edge_cases(self):
+        """Test edge cases in date formatting."""
+        client = LocApiClient(request_delay=0.1)
+        
+        # Test malformed date
+        result = client._format_search_date('invalid-date')
+        assert result == 'invalid-date'  # Should return as-is
+        
+        # Test empty string
+        result = client._format_search_date('')
+        assert result == ''
+    
+    @responses.activate
+    def test_estimate_download_size_multiple_pages(self):
+        """Test download size estimation with multiple API calls."""
+        # Mock multiple page responses
+        responses.add(
+            responses.GET,
+            'https://chroniclingamerica.loc.gov/search/pages/results/',
+            json={'items': [{'id': f'item{i}'} for i in range(100)]},
+            status=200
+        )
+        responses.add(
+            responses.GET, 
+            'https://chroniclingamerica.loc.gov/search/pages/results/',
+            json={'items': [{'id': f'item{i}'} for i in range(100, 200)]},
+            status=200
+        )
+        responses.add(
+            responses.GET,
+            'https://chroniclingamerica.loc.gov/search/pages/results/', 
+            json={'items': [{'id': f'item{i}'} for i in range(200, 300)]},
+            status=200
+        )
+        
+        client = LocApiClient(request_delay=0.1)
+        estimate = client.estimate_download_size(('1900', '1910'))
+        
+        # Should sample multiple pages and estimate
+        assert estimate['total_pages'] >= 300
+        assert estimate['estimated_size_gb'] > 0
+        assert estimate['estimated_time_hours'] > 0

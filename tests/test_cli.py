@@ -220,7 +220,7 @@ class TestCLI:
             
             assert result.exit_code == 0
             assert "Creating 6 date facets from 1900 to 1905" in result.output
-            mock_discovery_instance.create_date_range_facets.assert_called_once_with(1900, 1905, facet_size_years=1, estimate_items=False)
+            mock_discovery_instance.create_date_range_facets.assert_called_once_with(1900, 1905, facet_size_years=1, estimate_items=False, rate_limit_delay=None)
             
     @patch('newsagger.cli.Config')
     @patch('newsagger.cli.LocApiClient')
@@ -502,3 +502,77 @@ class TestCLI:
             
             # Should not crash, but may have non-zero exit code
             assert "Config error" in result.output or result.exit_code != 0
+
+    @patch('newsagger.cli.Config')
+    @patch('newsagger.cli.NewsStorage')
+    def test_status_command(self, mock_storage, mock_config):
+        """Test status command."""
+        mock_config_instance = Mock()
+        mock_config_instance.get_storage_config.return_value = {'db_path': ':memory:'}
+        mock_config.return_value = mock_config_instance
+        
+        mock_storage_instance = Mock()
+        mock_storage_instance.get_storage_stats.return_value = {
+            'total_newspapers': 5,
+            'total_pages': 1000,
+            'downloaded_pages': 500,
+            'db_size_mb': 25.5
+        }
+        mock_storage_instance.get_discovery_stats.return_value = {
+            'total_periodicals': 5,
+            'discovered_periodicals': 3,
+            'downloaded_periodicals': 1,
+            'total_facets': 10,
+            'completed_facets': 5,
+            'error_facets': 1,
+            'estimated_items': 50000,
+            'actual_items': 45000,
+            'discovered_items': 30000,
+            'downloaded_items': 10000,
+            'total_queue_items': 100,
+            'queued_items': 80,
+            'active_items': 5,
+            'completed_queue_items': 15,
+            'avg_queue_progress': 25.0
+        }
+        mock_storage_instance.get_search_facets.return_value = [
+            {'facet_value': '1906/1906'},
+            {'facet_value': '1907/1907'}
+        ]
+        mock_storage.return_value = mock_storage_instance
+        
+        result = self.runner.invoke(cli, ['status'])
+        
+        assert result.exit_code == 0
+        assert "Newsagger Status Overview" in result.output
+        assert "Storage:" in result.output
+        assert "Newspapers: 5" in result.output
+        assert "Pages discovered: 1,000" in result.output
+        assert "Periodicals:" in result.output
+        assert "Search Facets:" in result.output
+
+    @patch('newsagger.cli.Config')  
+    @patch('newsagger.cli.NewsStorage')
+    @patch('newsagger.cli.LocApiClient')
+    @patch('newsagger.cli.DownloadProcessor')
+    def test_resume_downloads_command(self, mock_downloader, mock_client, mock_storage, mock_config):
+        """Test resume-downloads command."""
+        mock_config_instance = Mock()
+        mock_config_instance.get_storage_config.return_value = {'db_path': ':memory:'}
+        mock_config_instance.get_api_config.return_value = {'base_url': 'test'}
+        mock_config.return_value = mock_config_instance
+        
+        mock_storage_instance = Mock()
+        mock_storage.return_value = mock_storage_instance
+        
+        mock_client_instance = Mock()
+        mock_client.return_value = mock_client_instance
+        
+        mock_downloader_instance = Mock()
+        mock_downloader_instance.resume_failed_downloads.return_value = {'resumed': 2}
+        mock_downloader.return_value = mock_downloader_instance
+        
+        result = self.runner.invoke(cli, ['resume-downloads'])
+        
+        assert result.exit_code == 0
+        assert "Resuming failed downloads" in result.output

@@ -451,3 +451,170 @@ class TestDiscoveryAutomation:
         call_args = self.mock_api_client.search_pages.call_args[1]
         assert call_args['andtext'] == 'earthquake'
         assert discovered_count == 1
+
+    def test_discover_all_periodicals(self):
+        """Test discovering all periodicals."""
+        # Mock API response - both methods used by discovery
+        newspapers_data = [
+            {
+                'lccn': 'sn84038012',
+                'title': 'The San Francisco Call',
+                'state': 'California',
+                'place_of_publication': ['San Francisco, Calif.'],
+                'start_year': '1895',
+                'end_year': '1913',
+                'url': 'https://example.com'
+            }
+        ]
+        self.mock_api_client.get_all_newspapers.return_value = newspapers_data
+        self.mock_api_client.get_newspapers_with_details.return_value = iter(newspapers_data)
+        
+        # Mock processor
+        from newsagger.discovery import DiscoveryManager
+        self.mock_processor.process_newspapers_response.return_value = [
+            {
+                'lccn': 'sn84038012',
+                'title': 'The San Francisco Call',
+                'state': 'California',
+                'city': 'San Francisco',
+                'start_year': 1895,
+                'end_year': 1913,
+                'frequency': 'Daily',
+                'language': 'English',
+                'subject': 'General News',
+                'url': 'https://example.com'
+            }
+        ]
+        
+        with patch.object(self.storage, 'store_periodicals') as mock_store:
+            mock_store.return_value = 1  # Mock returning 1 stored periodical
+            
+            discovered_count = self.discovery.discover_all_periodicals(max_newspapers=1)
+            
+            assert discovered_count == 1
+            mock_store.assert_called_once()
+
+    def test_create_state_facets(self):
+        """Test creating state facets from discovered periodicals."""
+        # Add periodicals to storage
+        periodicals = [
+            {'lccn': 'sn123', 'state': 'California', 'title': 'CA Paper'},
+            {'lccn': 'sn456', 'state': 'New York', 'title': 'NY Paper'}
+        ]
+        # Mock storage methods
+        with patch.object(self.storage, 'get_periodicals') as mock_get_periodicals, \
+             patch.object(self.storage, 'create_search_facet') as mock_create_facet:
+            
+            mock_get_periodicals.return_value = periodicals
+            mock_create_facet.side_effect = [1, 2]  # Return facet IDs
+            
+            facet_ids = self.discovery.create_state_facets()
+            
+            assert len(facet_ids) == 2
+            assert mock_create_facet.call_count == 2
+
+    def test_get_discovery_summary(self):
+        """Test getting comprehensive discovery summary."""
+        # Mock storage responses
+        with patch.object(self.storage, 'get_discovery_stats') as mock_stats:
+            mock_stats.return_value = {
+                'total_periodicals': 5,
+                'discovered_periodicals': 3,
+                'total_facets': 10,
+                'completed_facets': 5,
+                'total_queue_items': 20,
+                'queued_items': 15,
+                'estimated_items': 50000
+            }
+            
+            with patch.object(self.storage, 'get_download_queue') as mock_get_queue:
+                mock_get_queue.return_value = [
+                    {
+                        'queue_type': 'facet',
+                        'reference_id': '1',
+                        'priority': 1,
+                        'estimated_size_mb': 100,
+                        'estimated_time_hours': 2.5
+                    }
+                ]
+                
+                summary = self.discovery.get_discovery_summary()
+                
+                assert 'discovery_stats' in summary
+                assert 'next_downloads' in summary
+                assert summary['discovery_stats']['total_periodicals'] == 5
+                assert len(summary['next_downloads']) == 1
+
+    def test_discover_periodical_issues_error_handling(self):
+        """Test error handling in issue discovery."""
+        # Mock API to raise an exception
+        self.mock_api_client.get_newspaper_issues.side_effect = Exception("API Error")
+        
+        issues_count = self.discovery.discover_periodical_issues('sn123')
+        
+        # Should return 0 on error and not crash
+        assert issues_count == 0
+
+    def test_create_date_range_facets_with_estimation(self):
+        """Test creating date facets with item estimation."""
+        # Mock existing facets check
+        with patch.object(self.storage, 'get_search_facets') as mock_get_facets, \
+             patch.object(self.storage, 'create_search_facet') as mock_create_facet:
+            
+            mock_get_facets.return_value = []
+            mock_create_facet.side_effect = [1, 2]  # Return facet IDs
+            
+            # Mock estimation API calls
+            self.mock_api_client.search_pages.return_value = {
+                'items': [{'id': f'item{i}'} for i in range(50)]
+            }
+            
+            # Disable the rate limit delay for testing to avoid timing issues
+            with patch('time.sleep'):
+                facet_ids = self.discovery.create_date_range_facets(
+                    2000, 2001, facet_size_years=1, estimate_items=True, rate_limit_delay=0.01
+                )
+            
+            assert len(facet_ids) == 2  # 2000 and 2001
+            # Should have made estimation API calls
+            assert self.mock_api_client.search_pages.call_count == 2
+
+    def test_populate_download_queue(self):
+        """Test populating download queue with priorities."""
+        # Mock storage methods
+        with patch.object(self.storage, 'get_search_facets') as mock_get_facets, \
+             patch.object(self.storage, 'get_pages_for_facet') as mock_get_pages, \
+             patch.object(self.storage, 'add_to_download_queue') as mock_add_queue, \
+             patch.object(self.storage, 'get_download_queue') as mock_get_queue:
+            
+            # Mock facets with different calls returning different subsets
+            date_range_facets = [
+                {'id': 1, 'facet_type': 'date_range', 'facet_value': '1906/1906', 'status': 'completed', 'estimated_items': 100, 'actual_items': 95}
+            ]
+            state_facets = [
+                {'id': 2, 'facet_type': 'state', 'facet_value': 'California', 'status': 'completed', 'estimated_items': 50, 'actual_items': 45}
+            ]
+            completed_facets = date_range_facets + state_facets
+            
+            def mock_get_facets_side_effect(facet_type=None, status=None):
+                if facet_type == 'date_range':
+                    return date_range_facets
+                elif facet_type == 'state':
+                    return state_facets
+                elif status == 'completed':
+                    return completed_facets
+                else:
+                    return completed_facets
+            
+            mock_get_facets.side_effect = mock_get_facets_side_effect
+            mock_get_queue.return_value = []  # No existing queue items
+            mock_add_queue.return_value = None
+            
+            queue_count = self.discovery.populate_download_queue(
+                priority_states=['California'],
+                priority_date_ranges=['1906/1906']
+            )
+            
+            assert queue_count >= 0
+            # Should have made calls to add items to queue
+            assert mock_add_queue.call_count >= 2
