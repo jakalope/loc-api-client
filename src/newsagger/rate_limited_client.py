@@ -263,7 +263,7 @@ class LocApiClient:
         
         Common parameters:
         - andtext: Search text
-        - date1, date2: Date range (YYYY-MM-DD)
+        - date1, date2: Date range (YYYY-MM-DD or YYYY)
         - page: Page number
         - rows: Results per page
         - sort: Sort order
@@ -272,16 +272,27 @@ class LocApiClient:
         search_params = {'format': 'json'}
         search_params.update(params)
         
-        # Convert date parameters to LOC format if needed
-        if 'date1' in search_params:
+        # Handle date parameters and add proper dateFilterType
+        if 'date1' in search_params and 'date2' in search_params:
             date1 = search_params['date1']
-            if len(date1) == 4:  # Year only
-                search_params['date1'] = f'01/01/{date1}'
-        
-        if 'date2' in search_params:
             date2 = search_params['date2']
-            if len(date2) == 4:  # Year only
+            
+            # If both dates are 4-digit years, use yearRange filter type
+            if len(date1) == 4 and len(date2) == 4:
+                # For year-only searches, use dateFilterType=yearRange and keep dates as years
+                search_params['dateFilterType'] = 'yearRange'
+                # Keep dates as YYYY format for yearRange
+            elif len(date1) == 4:
+                # Convert year to MM/DD/YYYY format for range searches
+                search_params['date1'] = f'01/01/{date1}'
+                search_params['dateFilterType'] = 'range'
+            elif len(date2) == 4:
+                # Convert year to MM/DD/YYYY format for range searches  
                 search_params['date2'] = f'12/31/{date2}'
+                search_params['dateFilterType'] = 'range'
+            else:
+                # Both are specific dates, use range filter
+                search_params['dateFilterType'] = 'range'
         
         return self._make_request('search/pages/results/', search_params)
     
@@ -289,10 +300,11 @@ class LocApiClient:
         """Estimate the number of pages available for a date range."""
         start_year, end_year = date_range
         
-        # Use the search API to get total count
+        # Use the search API to get total count with proper date filtering
         params = {
-            'date1': f'01/01/{start_year}',
-            'date2': f'12/31/{end_year}',
+            'date1': str(start_year),
+            'date2': str(end_year),
+            'dateFilterType': 'yearRange',  # Use yearRange for year-based searches
             'rows': 1,  # Minimal results, we just want the total
             'page': 1
         }

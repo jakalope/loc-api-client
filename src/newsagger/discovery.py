@@ -408,7 +408,7 @@ class DiscoveryManager:
                     start_date, end_date = facet['facet_value'].split('/')
                     search_params['date1'] = start_date
                     search_params['date2'] = end_date
-                    search_params['dates_facet'] = f"{start_date}/{end_date}"
+                    # dateFilterType will be automatically added by rate_limited_client.py
                 elif facet['facet_type'] == 'state':
                     # For state facets, we'll use a more targeted approach:
                     # 1. Get periodicals from that state first
