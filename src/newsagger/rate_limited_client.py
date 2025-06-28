@@ -15,6 +15,15 @@ from datetime import datetime, timedelta
 import json
 from queue import Queue, Empty
 import atexit
+import random
+
+
+class CaptchaHandlingException(Exception):
+    """Custom exception for CAPTCHA scenarios that need special handling."""
+    def __init__(self, message, retry_strategy=None, suggested_params=None):
+        super().__init__(message)
+        self.retry_strategy = retry_strategy
+        self.suggested_params = suggested_params
 
 
 class RateLimitedRequestManager:
@@ -23,6 +32,7 @@ class RateLimitedRequestManager:
     
     Ensures that no more than 12 requests per minute are made to respect
     LOC's 20 requests/minute limit with a conservative safety buffer.
+    Includes advanced CAPTCHA handling with alternative retry strategies.
     """
     
     _instance = None
@@ -63,6 +73,12 @@ class RateLimitedRequestManager:
         # Request queue for threading support
         self.request_queue = Queue()
         self.is_processing = False
+        
+        # CAPTCHA handling state
+        self.captcha_count = 0
+        self.last_captcha_time = 0
+        self.adaptive_delay_multiplier = 1.0
+        self.consecutive_captchas = 0
         
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"Initialized rate-limited client: max {max_requests_per_minute} req/min")
@@ -113,6 +129,204 @@ class RateLimitedRequestManager:
             self.last_request_time = current_time
             self.request_count_window.append(current_time)
     
+    def _determine_captcha_strategy(self, attempt: int, params: Dict) -> Dict:
+        """
+        Determine the best strategy for handling CAPTCHA based on attempt count and history.
+        
+        Returns a strategy dictionary with action, wait_time, and other relevant parameters.
+        """
+        current_time = time.time()
+        time_since_last_captcha = current_time - self.last_captcha_time if self.last_captcha_time else float('inf')
+        
+        # Strategy 1: First CAPTCHA - Try reducing batch size and longer delay
+        if attempt == 0:
+            # Adaptive wait time based on consecutive CAPTCHAs
+            base_wait = 600  # 10 minutes base wait
+            adaptive_wait = base_wait * (1.5 ** max(0, self.consecutive_captchas - 1))
+            wait_time = min(adaptive_wait, 3600)  # Cap at 1 hour
+            
+            def modify_params(original_params):
+                modified = original_params.copy() if original_params else {}
+                # Reduce batch size if present
+                if 'rows' in modified:
+                    original_rows = int(modified['rows'])
+                    modified['rows'] = max(10, original_rows // 2)  # Halve batch size, min 10
+                # Add random jitter to avoid patterns
+                if 'page' in modified:
+                    time.sleep(random.uniform(2, 8))  # Random delay between 2-8 seconds
+                return modified
+            
+            return {
+                'action': 'retry',
+                'strategy': 'reduce_batch_size',
+                'wait_time': wait_time,
+                'modify_params': modify_params,
+                'message': f'Reducing batch size and waiting {wait_time/60:.1f} minutes'
+            }
+        
+        # Strategy 2: Second CAPTCHA - Try even smaller batch and longer delay
+        elif attempt == 1:
+            wait_time = 1200 * (1.2 ** self.consecutive_captchas)  # 20 minutes, scaling up
+            wait_time = min(wait_time, 7200)  # Cap at 2 hours
+            
+            def modify_params(original_params):
+                modified = original_params.copy() if original_params else {}
+                # Further reduce batch size
+                if 'rows' in modified:
+                    modified['rows'] = max(5, int(modified['rows']) // 3)  # Even smaller batches
+                # Add more specific date constraints to reduce load
+                if 'date1' in modified and 'date2' in modified:
+                    # If searching a year range, split it
+                    try:
+                        date1 = int(modified['date1'])
+                        date2 = int(modified['date2'])
+                        if date2 - date1 > 0:
+                            # Limit to first half of year range
+                            mid_year = date1 + (date2 - date1) // 2
+                            modified['date2'] = str(mid_year)
+                    except (ValueError, TypeError):
+                        pass  # Keep original dates if parsing fails
+                return modified
+            
+            return {
+                'action': 'retry',
+                'strategy': 'micro_batches_split_dates',
+                'wait_time': wait_time,
+                'modify_params': modify_params,
+                'message': f'Using micro-batches with date splitting, waiting {wait_time/60:.1f} minutes'
+            }
+        
+        # Strategy 3: Third CAPTCHA - Suggest facet splitting or cooling-off
+        else:
+            # If we've hit multiple CAPTCHAs recently, suggest a different approach
+            if self.consecutive_captchas >= 3 or time_since_last_captcha < 1800:  # Less than 30 minutes
+                return {
+                    'action': 'suggest_alternatives',
+                    'strategy': 'facet_splitting_required',
+                    'message': (
+                        f'Multiple CAPTCHAs detected (consecutive: {self.consecutive_captchas}). '
+                        f'Consider splitting this facet into smaller date ranges or using manual cool-off period.'
+                    ),
+                    'suggested_params': {
+                        'split_facet': True,
+                        'cooling_off_hours': 2,
+                        'reduce_batch_size': 5
+                    }
+                }
+            else:
+                # Final retry with very conservative settings
+                wait_time = 3600  # 1 hour wait
+                
+                def modify_params(original_params):
+                    modified = original_params.copy() if original_params else {}
+                    # Ultra-conservative settings
+                    modified['rows'] = '1'  # Single item per request
+                    return modified
+                
+                return {
+                    'action': 'retry',
+                    'strategy': 'ultra_conservative',
+                    'wait_time': wait_time,
+                    'modify_params': modify_params,
+                    'message': f'Final attempt with ultra-conservative settings: 1 item per request, {wait_time/60:.1f} minute wait'
+                }
+    
+    def _detect_captcha_advanced(self, response) -> bool:
+        """
+        Enhanced CAPTCHA detection using multiple indicators.
+        
+        Returns True if CAPTCHA is detected, False otherwise.
+        """
+        # Check status code patterns that indicate CAPTCHA
+        if response.status_code in [403, 406, 503]:
+            # These status codes sometimes indicate CAPTCHA challenges
+            if any(pattern in response.text.lower() for pattern in ['captcha', 'challenge', 'verify']):
+                self.logger.debug(f"CAPTCHA suspected from status code {response.status_code} with challenge content")
+                return True
+        
+        # Enhanced text pattern detection
+        captcha_patterns = [
+            'captcha', 'recaptcha', 'g-recaptcha',
+            'challenge', 'verify you are human', 'verify that you are human',
+            'prove you are human', 'robot verification',
+            'security check', 'access denied', 'blocked request',
+            'hcaptcha', 'cloudflare', 'ray id',  # Cloudflare protection
+            'checking your browser', 'ddos protection',
+            'please wait while we verify', 'verifying you are human'
+        ]
+        
+        response_text_lower = response.text.lower()
+        detected_patterns = [pattern for pattern in captcha_patterns if pattern in response_text_lower]
+        
+        if detected_patterns:
+            self.logger.debug(f"CAPTCHA patterns detected: {detected_patterns}")
+            return True
+        
+        # Check for specific HTML elements that indicate CAPTCHA
+        html_indicators = [
+            '<div class="g-recaptcha"',
+            '<script src="https://www.google.com/recaptcha/',
+            '<div id="captcha"',
+            '<div class="captcha"',
+            'data-sitekey=',  # reCAPTCHA site key
+            'cf-browser-verification',  # Cloudflare browser check
+            'cf-challenge-form',  # Cloudflare challenge form
+            'hcaptcha-container'  # hCaptcha container
+        ]
+        
+        detected_html = [indicator for indicator in html_indicators if indicator in response.text]
+        
+        if detected_html:
+            self.logger.debug(f"CAPTCHA HTML indicators detected: {detected_html}")
+            return True
+        
+        # Check for JavaScript patterns that load CAPTCHA
+        js_patterns = [
+            'grecaptcha.render',
+            'grecaptcha.execute',
+            'turnstile.render',  # Cloudflare Turnstile
+            'hcaptcha.render',
+            'challenge-form'
+        ]
+        
+        detected_js = [pattern for pattern in js_patterns if pattern in response.text]
+        
+        if detected_js:
+            self.logger.debug(f"CAPTCHA JavaScript patterns detected: {detected_js}")
+            return True
+        
+        # Check response headers for CAPTCHA indicators
+        headers = response.headers
+        captcha_headers = [
+            'cf-ray',  # Cloudflare Ray ID often appears with challenges
+            'cf-cache-status',
+            'x-captcha-required',
+            'x-rate-limit-exceeded'
+        ]
+        
+        detected_headers = [header for header in captcha_headers if header.lower() in [h.lower() for h in headers.keys()]]
+        
+        if detected_headers:
+            self.logger.debug(f"CAPTCHA-related headers detected: {detected_headers}")
+            # Only return True for definitive CAPTCHA headers
+            if any(header.lower() in ['x-captcha-required'] for header in detected_headers):
+                return True
+        
+        # Check for content length patterns (CAPTCHA pages are often much smaller)
+        content_length = len(response.text)
+        if content_length < 5000 and any(pattern in response_text_lower for pattern in ['challenge', 'verify', 'access']):
+            self.logger.debug(f"Suspicious small content length ({content_length}) with challenge keywords")
+            return True
+        
+        return False
+    
+    def reset_captcha_counters(self):
+        """Reset CAPTCHA counters after successful requests."""
+        if self.consecutive_captchas > 0:
+            self.logger.info(f"Resetting CAPTCHA counters after successful request (was {self.consecutive_captchas} consecutive)")
+            self.consecutive_captchas = 0
+            self.adaptive_delay_multiplier = max(1.0, self.adaptive_delay_multiplier * 0.9)  # Gradually reduce delay
+    
     def _make_request(self, endpoint: str, params: Optional[Dict] = None) -> Dict:
         """
         Make a rate-limited request to the API with retries and 429 handling.
@@ -145,22 +359,52 @@ class RateLimitedRequestManager:
                             f"Server requires {backoff_time/3600:.1f} hour wait."
                         )
                 
-                # Check for CAPTCHA in HTML response
-                if 'captcha' in response.text.lower() or 'recaptcha' in response.text.lower():
-                    self.logger.warning(f"CAPTCHA detected on attempt {attempt + 1}")
-                    if attempt < self.max_retries - 1:
-                        wait_time = 300 * (2 ** attempt)  # 5min, 10min, 20min
-                        self.logger.warning(f"Waiting {wait_time/60:.1f} minutes before retry...")
+                # Enhanced CAPTCHA detection
+                if self._detect_captcha_advanced(response):
+                    self.captcha_count += 1
+                    self.consecutive_captchas += 1
+                    self.last_captcha_time = time.time()
+                    
+                    self.logger.warning(f"CAPTCHA detected on attempt {attempt + 1} (total: {self.captcha_count}, consecutive: {self.consecutive_captchas})")
+                    
+                    # Determine retry strategy based on attempt and CAPTCHA history
+                    retry_strategy = self._determine_captcha_strategy(attempt, params)
+                    
+                    if retry_strategy['action'] == 'retry':
+                        wait_time = retry_strategy['wait_time']
+                        self.logger.warning(f"Strategy: {retry_strategy['strategy']} - Waiting {wait_time/60:.1f} minutes before retry...")
+                        
+                        # Apply adaptive rate limiting
+                        self.adaptive_delay_multiplier = min(self.adaptive_delay_multiplier * 1.5, 3.0)
+                        
                         time.sleep(wait_time)
+                        
+                        # Modify request parameters if suggested
+                        if retry_strategy.get('modify_params'):
+                            params = retry_strategy['modify_params'](params)
+                            self.logger.info(f"Modified request parameters for CAPTCHA avoidance")
+                        
                         continue
+                    elif retry_strategy['action'] == 'suggest_alternatives':
+                        # Raise special exception with suggested alternatives
+                        raise CaptchaHandlingException(
+                            retry_strategy['message'],
+                            retry_strategy=retry_strategy['strategy'],
+                            suggested_params=retry_strategy.get('suggested_params')
+                        )
                     else:
+                        # Final failure
                         raise requests.exceptions.RequestException(
                             f"CAPTCHA detected by LOC API after {self.max_retries} attempts. "
-                            f"Manual intervention required."
+                            f"Strategy exhausted: {retry_strategy['strategy']}. Manual intervention required."
                         )
                 
                 response.raise_for_status()
                 self.logger.debug(f"Request successful: {endpoint}")
+                
+                # Reset CAPTCHA counters on successful request
+                self.reset_captcha_counters()
+                
                 return response.json()
                 
             except requests.exceptions.RequestException as e:

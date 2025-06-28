@@ -8,7 +8,7 @@ for systematic downloading from the Library of Congress API.
 import logging
 from typing import Dict, List, Optional, Tuple, Generator
 from datetime import datetime
-from .rate_limited_client import LocApiClient
+from .rate_limited_client import LocApiClient, CaptchaHandlingException
 from .processor import NewsDataProcessor
 from .storage import NewsStorage
 
@@ -527,11 +527,56 @@ class DiscoveryManager:
             self.logger.info(f"Completed discovery for facet {facet_id}: {total_discovered} items")
             return total_discovered
             
+        except CaptchaHandlingException as e:
+            self.logger.warning(f"CAPTCHA handling exception for facet {facet_id}: {e}")
+            
+            # Handle CAPTCHA exceptions with automatic recovery strategies
+            if e.retry_strategy == 'facet_splitting_required':
+                # Mark for facet splitting instead of error
+                self.storage.update_facet_discovery(
+                    facet_id,
+                    status='needs_splitting',
+                    error_message=f"CAPTCHA-triggered splitting needed: {e}",
+                    items_discovered=total_discovered,
+                    actual_items=total_discovered
+                )
+                self.logger.info(f"Marked facet {facet_id} for splitting due to CAPTCHA (discovered {total_discovered} items)")
+                return total_discovered
+            else:
+                # For other CAPTCHA strategies, mark for delayed retry
+                import time
+                next_retry_time = int(time.time()) + (e.suggested_params.get('cooling_off_hours', 1) * 3600)
+                self.storage.update_facet_discovery(
+                    facet_id,
+                    status='captcha_retry',
+                    error_message=f"CAPTCHA retry scheduled: {e}",
+                    items_discovered=total_discovered,
+                    next_retry_time=next_retry_time
+                )
+                self.logger.info(f"Scheduled facet {facet_id} for CAPTCHA retry (discovered {total_discovered} items)")
+                return total_discovered
+                
         except Exception as e:
             error_message = str(e)
             
+            # Handle CAPTCHA-related errors from the old error format
+            if 'captcha' in error_message.lower():
+                self.logger.warning(f"Legacy CAPTCHA error for facet {facet_id}: {e}")
+                # Mark for retry instead of permanent error
+                import time
+                next_retry_time = int(time.time()) + 7200  # 2 hour delay
+                self.storage.update_facet_discovery(
+                    facet_id,
+                    status='captcha_retry',
+                    error_message=f"Legacy CAPTCHA error - retry scheduled: {error_message}",
+                    items_discovered=total_discovered,
+                    next_retry_time=next_retry_time
+                )
+                self.logger.info(f"Scheduled facet {facet_id} for CAPTCHA retry due to legacy error (discovered {total_discovered} items)")
+                return total_discovered
+            
             # Handle timeout errors more gracefully
-            if 'timeout' in error_message.lower():
+            elif 'timeout' in error_message.lower():
                 self.logger.warning(f"Timeout discovering content for facet {facet_id}. Consider using smaller batches or more specific searches.")
                 # Mark as partial completion if we discovered some items
                 if total_discovered > 0:
@@ -711,3 +756,185 @@ class DiscoveryManager:
             priority -= 1
         
         return max(1, min(10, priority))  # Clamp between 1-10
+    
+    def process_captcha_recovery(self) -> Dict[str, int]:
+        """
+        Process facets marked for CAPTCHA retry and facet splitting.
+        Returns statistics about recovery operations performed.
+        """
+        import time
+        current_time = int(time.time())
+        stats = {
+            'retries_processed': 0,
+            'splits_processed': 0,
+            'retries_scheduled': 0,
+            'errors': 0
+        }
+        
+        # Process facets marked for CAPTCHA retry
+        retry_facets = self.storage.get_search_facets(status='captcha_retry')
+        for facet in retry_facets:
+            facet_id = facet['id']
+            next_retry_time = facet.get('next_retry_time', 0)
+            
+            if current_time >= next_retry_time:
+                self.logger.info(f"Processing CAPTCHA retry for facet {facet_id}")
+                try:
+                    # Reset status to pending for retry
+                    self.storage.update_facet_discovery(facet_id, status='pending')
+                    
+                    # Attempt discovery with more conservative settings
+                    discovered = self.discover_facet_content(
+                        facet_id, 
+                        batch_size=10,  # Very small batches
+                        max_items=1000  # Limit to reduce CAPTCHA risk
+                    )
+                    stats['retries_processed'] += 1
+                    self.logger.info(f"CAPTCHA retry successful for facet {facet_id}: {discovered} items")
+                    
+                except Exception as e:
+                    if 'captcha' in str(e).lower():
+                        # Schedule another retry with longer delay
+                        next_retry = current_time + 14400  # 4 hours
+                        self.storage.update_facet_discovery(
+                            facet_id,
+                            status='captcha_retry',
+                            next_retry_time=next_retry,
+                            error_message=f"Retry failed, rescheduled: {e}"
+                        )
+                        stats['retries_scheduled'] += 1
+                        self.logger.warning(f"CAPTCHA retry failed for facet {facet_id}, rescheduled for 4 hours")
+                    else:
+                        self.logger.error(f"Non-CAPTCHA error during retry for facet {facet_id}: {e}")
+                        stats['errors'] += 1
+            else:
+                # Still waiting for retry time
+                remaining_wait = (next_retry_time - current_time) / 3600
+                self.logger.debug(f"Facet {facet_id} still cooling off, {remaining_wait:.1f} hours remaining")
+        
+        # Process facets marked for splitting
+        split_facets = self.storage.get_search_facets(status='needs_splitting')
+        for facet in split_facets:
+            try:
+                split_count = self.split_facet_for_captcha_recovery(facet['id'])
+                stats['splits_processed'] += split_count
+                self.logger.info(f"Split facet {facet['id']} into {split_count} smaller facets")
+            except Exception as e:
+                self.logger.error(f"Error splitting facet {facet['id']}: {e}")
+                stats['errors'] += 1
+        
+        return stats
+    
+    def split_facet_for_captcha_recovery(self, facet_id: int) -> int:
+        """
+        Split a facet that triggered CAPTCHA into smaller, more manageable facets.
+        Returns the number of new facets created.
+        """
+        facet = self.storage.get_search_facet(facet_id)
+        if not facet:
+            raise ValueError(f"Facet {facet_id} not found")
+        
+        splits_created = 0
+        
+        if facet['facet_type'] == 'date_range':
+            # Split date range into smaller chunks
+            try:
+                start_date, end_date = facet['facet_value'].split('/')
+                start_year = int(start_date)
+                end_year = int(end_date)
+                
+                if start_year == end_year:
+                    # Single year - split by quarters
+                    quarters = [
+                        (f"{start_year}0101", f"{start_year}0331"),  # Q1
+                        (f"{start_year}0401", f"{start_year}0630"),  # Q2  
+                        (f"{start_year}0701", f"{start_year}0930"),  # Q3
+                        (f"{start_year}1001", f"{start_year}1231"),  # Q4
+                    ]
+                    
+                    for i, (q_start, q_end) in enumerate(quarters):
+                        quarter_name = f"Q{i+1}"
+                        self.storage.create_search_facet(
+                            facet_type='date_range',
+                            facet_value=f"{q_start}/{q_end}",
+                            query=facet.get('query'),
+                            estimated_items=facet.get('estimated_items', 0) // 4,
+                            priority=facet.get('priority', 5) - 1  # Higher priority for splits
+                        )
+                        splits_created += 1
+                        self.logger.info(f"Created quarterly facet for {start_year} {quarter_name}: {q_start}/{q_end}")
+                
+                else:
+                    # Multi-year range - split by individual years
+                    for year in range(start_year, end_year + 1):
+                        self.storage.create_search_facet(
+                            facet_type='date_range',
+                            facet_value=f"{year}/{year}",
+                            query=facet.get('query'),
+                            estimated_items=facet.get('estimated_items', 0) // (end_year - start_year + 1),
+                            priority=facet.get('priority', 5) - 1  # Higher priority for splits
+                        )
+                        splits_created += 1
+                        self.logger.info(f"Created yearly facet: {year}/{year}")
+                        
+            except (ValueError, AttributeError) as e:
+                self.logger.error(f"Could not parse date range for facet {facet_id}: {facet['facet_value']}")
+                raise
+        
+        elif facet['facet_type'] == 'state':
+            # For state facets, split by combining with date ranges
+            state = facet['facet_value']
+            current_year = datetime.now().year
+            
+            # Create smaller date-limited state searches
+            year_ranges = [
+                (1900, 1920), (1921, 1940), (1941, 1960), 
+                (1961, 1980), (1981, 2000), (2001, current_year)
+            ]
+            
+            for start_year, end_year in year_ranges:
+                # Create hybrid facet with state + date constraints
+                hybrid_query = f"state:{state} AND date:[{start_year} TO {end_year}]"
+                self.storage.create_search_facet(
+                    facet_type='hybrid',
+                    facet_value=f"{state}_{start_year}_{end_year}",
+                    query=hybrid_query,
+                    estimated_items=facet.get('estimated_items', 0) // len(year_ranges),
+                    priority=facet.get('priority', 5) - 1
+                )
+                splits_created += 1
+                self.logger.info(f"Created hybrid state-date facet: {state} {start_year}-{end_year}")
+        
+        # Mark original facet as split
+        self.storage.update_facet_discovery(
+            facet_id,
+            status='split_completed',
+            error_message=f"Split into {splits_created} smaller facets due to CAPTCHA"
+        )
+        
+        return splits_created
+    
+    def get_captcha_recovery_status(self) -> Dict:
+        """Get status of facets needing CAPTCHA recovery."""
+        import time
+        current_time = int(time.time())
+        
+        retry_facets = self.storage.get_search_facets(status='captcha_retry')
+        split_facets = self.storage.get_search_facets(status='needs_splitting')
+        
+        ready_for_retry = 0
+        waiting_for_retry = 0
+        
+        for facet in retry_facets:
+            next_retry_time = facet.get('next_retry_time', 0)
+            if current_time >= next_retry_time:
+                ready_for_retry += 1
+            else:
+                waiting_for_retry += 1
+        
+        return {
+            'ready_for_retry': ready_for_retry,
+            'waiting_for_retry': waiting_for_retry,
+            'needs_splitting': len(split_facets),
+            'total_recovery_needed': ready_for_retry + waiting_for_retry + len(split_facets)
+        }
