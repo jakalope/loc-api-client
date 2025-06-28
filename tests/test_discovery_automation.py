@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
 
-from newsagger.discovery import DiscoveryManager
+from newsagger.discovery_manager import DiscoveryManager
 from newsagger.storage import NewsStorage
 from newsagger.api_client import LocApiClient
 from newsagger.processor import NewsDataProcessor
@@ -470,7 +470,7 @@ class TestDiscoveryAutomation:
         self.mock_api_client.get_newspapers_with_details.return_value = iter(newspapers_data)
         
         # Mock processor
-        from newsagger.discovery import DiscoveryManager
+        from newsagger.discovery_manager import DiscoveryManager
         self.mock_processor.process_newspapers_response.return_value = [
             {
                 'lccn': 'sn84038012',

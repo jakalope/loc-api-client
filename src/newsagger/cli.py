@@ -12,7 +12,7 @@ from .config import Config
 from .rate_limited_client import LocApiClient, CaptchaHandlingException
 from .processor import NewsDataProcessor
 from .storage import NewsStorage
-from .discovery import DiscoveryManager
+from .discovery_manager import DiscoveryManager
 from .downloader import DownloadProcessor
 
 

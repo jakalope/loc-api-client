@@ -11,6 +11,11 @@ from datetime import datetime
 from .rate_limited_client import LocApiClient, CaptchaHandlingException
 from .processor import NewsDataProcessor
 from .storage import NewsStorage
+from .discovery.facet_processor import (
+    FacetStatusValidator,
+    FacetSearchParamsBuilder,
+    FacetDiscoveryContext
+)
 
 
 class DiscoveryManager:
@@ -375,90 +380,36 @@ class DiscoveryManager:
         
         self.logger.info(f"Discovering content for facet {facet_id}: {facet['facet_type']} = {facet['facet_value']}")
         
-        # Proactive CAPTCHA interruption detection and fix
-        if facet.get('status') == 'completed':
-            current_page = facet.get('current_page')
-            error_message = facet.get('error_message', '')
-            
-            # Check if this facet was incorrectly marked as completed due to CAPTCHA interruption
-            captcha_indicators = []
-            
-            # Check for mid-discovery interruption (current_page set but no error)
-            if current_page and current_page > 1 and not error_message:
-                captcha_indicators.append(f"interrupted at page {current_page} with no error message")
-            
-            # Check if resume_from_page is set
-            resume_from_page_check = facet.get('resume_from_page')
-            if resume_from_page_check and resume_from_page_check > 1:
-                captcha_indicators.append(f"resume page set to {resume_from_page_check}")
-            
-            if captcha_indicators:
-                self.logger.warning(f"Detected incorrectly completed facet {facet_id}: {'; '.join(captcha_indicators)}")
-                self.logger.info(f"Auto-fixing facet {facet_id} and continuing discovery...")
-                
-                # Auto-fix the facet status
-                import time
-                retry_time = time.time() + 1800  # 30 minute cooling-off
-                retry_message = f"Auto-fixed incorrectly completed facet - was interrupted (indicators: {'; '.join(captcha_indicators)}). Fixed at: {time.ctime()}"
-                
-                # Resume from the next page after interruption
-                resume_page = current_page + 1 if current_page and current_page > 1 else 1
-                
-                self.storage.update_facet_discovery(
-                    facet_id,
-                    status='discovering',  # Set to discovering so we can continue
-                    error_message=retry_message,
-                    current_page=resume_page  # This will set resume_from_page automatically
-                )
-                
-                self.logger.info(f"Auto-fixed facet {facet_id}: status changed to 'discovering', will resume from page {resume_page}")
-                
-                # Update facet data for continued processing
-                facet['status'] = 'discovering'
-                facet['current_page'] = resume_page
-                facet['resume_from_page'] = resume_page
-                facet['error_message'] = retry_message
+        # Validate and fix any CAPTCHA interruption issues
+        status_validator = FacetStatusValidator(self.storage, self.logger)
+        facet = status_validator.validate_and_fix_facet_status(facet)
         
-        # Check for resume capability
-        resume_from_page = facet.get('resume_from_page', 1)
-        if resume_from_page > 1:
-            self.logger.info(f"Resuming facet {facet_id} discovery from page {resume_from_page}")
-            total_discovered = facet.get('items_discovered', 0)
+        # Initialize discovery context for resume and progress management
+        discovery_context = FacetDiscoveryContext(facet, batch_size, max_items)
+        
+        # Resume capability logging
+        if discovery_context.resume_from_page > 1:
+            self.logger.info(f"Resuming facet {facet_id} discovery from page {discovery_context.resume_from_page}")
         else:
             # Update facet status to discovering
             self.logger.debug(f"Setting facet {facet_id} status to discovering")
             self.storage.update_facet_discovery(facet_id, status='discovering')
             self.logger.debug(f"Facet {facet_id} status updated")
-            total_discovered = 0
         
-        page = resume_from_page
-        discovery_interrupted = False
-        interruption_reason = None
-        
-        # Adjust batch size for different facet types
-        if facet['facet_type'] == 'state':
-            # Use smaller batches for state searches to avoid timeouts
-            batch_size = min(batch_size, 50)
-            self.logger.info(f"Using smaller batch size ({batch_size}) for state facet to avoid timeouts")
+        # Initialize search parameter builder with batch size adjustment
+        params_builder = FacetSearchParamsBuilder(self.logger)
+        adjusted_batch_size = params_builder.adjust_batch_size_for_facet(facet, batch_size)
+        discovery_context.batch_size = adjusted_batch_size
         
         try:
-            while True:
-                # Build search query based on facet type
-                search_params = {
-                    'page': page,
-                    'rows': batch_size
-                }
+            while discovery_context.should_continue_discovery():
+                # Build search parameters using the extracted builder
+                search_params = params_builder.build_search_params(
+                    facet, discovery_context.current_page, discovery_context.batch_size
+                )
                 
-                if facet['facet_type'] == 'date_range':
-                    # Parse date range like "1906/1906"
-                    start_date, end_date = facet['facet_value'].split('/')
-                    search_params['date1'] = start_date
-                    search_params['date2'] = end_date
-                    # dateFilterType will be automatically added by rate_limited_client.py
-                elif facet['facet_type'] == 'state':
-                    # For state facets, we'll use a more targeted approach:
-                    # 1. Get periodicals from that state first
-                    # 2. Then search by specific newspapers rather than broad state search
+                # Handle special case for state facets with no periodicals
+                if facet['facet_type'] == 'state':
                     state_periodicals = self.storage.get_periodicals(state=facet['facet_value'])
                     if not state_periodicals:
                         self.logger.warning(f"No periodicals found for state {facet['facet_value']}")
@@ -473,20 +424,17 @@ class DiscoveryManager:
                         return 0
                     
                     # Use the first few LCCNs from the state for more focused search
-                    # This prevents massive result sets that timeout
                     sample_lccns = [p['lccn'] for p in state_periodicals[:5]]  # Limit to 5 newspapers
                     if sample_lccns:
-                        # Search for content from these specific newspapers
                         search_params['andtext'] = f"lccn:({' OR '.join(sample_lccns)})"
                     else:
-                        # Fallback to a simpler state-based search
                         search_params['andtext'] = facet['facet_value']
-                elif facet['query']:
+                elif facet.get('query'):
                     search_params['andtext'] = facet['query']
                 
                 # Perform search with timeout handling
                 try:
-                    self.logger.debug(f"Searching facet {facet_id} page {page} with params: {search_params}")
+                    self.logger.debug(f"Searching facet {facet_id} page {discovery_context.current_page} with params: {search_params}")
                     self.logger.debug(f"About to call search_pages for facet {facet_id}")
                     response = self.api_client.search_pages(**search_params)
                     self.logger.debug(f"Got API response for facet {facet_id}, processing...")
@@ -494,10 +442,10 @@ class DiscoveryManager:
                     self.logger.debug(f"Processed response for facet {facet_id}, got {len(pages)} pages")
                     
                     if not pages:
-                        self.logger.debug(f"No results on page {page} for facet {facet_id}, ending discovery")
+                        self.logger.debug(f"No results on page {discovery_context.current_page} for facet {facet_id}, ending discovery")
                         break
                         
-                    self.logger.debug(f"Found {len(pages)} pages on page {page} for facet {facet_id}")
+                    self.logger.debug(f"Found {len(pages)} pages on page {discovery_context.current_page} for facet {facet_id}")
                     
                 except CaptchaHandlingException:
                     # Let CAPTCHA exceptions propagate to the global handler
@@ -505,125 +453,121 @@ class DiscoveryManager:
                     raise
                     
                 except Exception as e:
-                    self.logger.warning(f"Search failed for facet {facet_id} page {page}: {e}")
+                    self.logger.warning(f"Search failed for facet {facet_id} page {discovery_context.current_page}: {e}")
                     
                     # Check if this is a legacy CAPTCHA-related error
                     if 'captcha' in str(e).lower():
-                        discovery_interrupted = True
-                        interruption_reason = 'captcha'
-                        self.logger.warning(f"Legacy CAPTCHA interruption on facet {facet_id} page {page} - marking for recovery")
+                        discovery_context.discovery_interrupted = True
+                        discovery_context.interruption_reason = 'captcha'
+                        self.logger.warning(f"Legacy CAPTCHA interruption on facet {facet_id} page {discovery_context.current_page} - marking for recovery")
                         break
                     # For certain errors, we should stop rather than continue
                     elif 'timeout' in str(e).lower() or 'connection' in str(e).lower():
-                        discovery_interrupted = True
-                        interruption_reason = 'timeout'
+                        discovery_context.discovery_interrupted = True
+                        discovery_context.interruption_reason = 'timeout'
                         self.logger.warning(f"Network issue on facet {facet_id}, stopping discovery")
                         break
-                    elif page == 1:
+                    elif discovery_context.current_page == 1:
                         # If first page fails, this facet might be problematic
                         self.logger.error(f"First page failed for facet {facet_id}, marking as error")
                         raise
                     else:
                         # If later pages fail, we can still save what we found
-                        discovery_interrupted = True
-                        interruption_reason = 'other_error'
-                        self.logger.warning(f"Page {page} failed for facet {facet_id}, stopping at page {page-1}")
+                        discovery_context.discovery_interrupted = True
+                        discovery_context.interruption_reason = 'other_error'
+                        self.logger.warning(f"Page {discovery_context.current_page} failed for facet {facet_id}, stopping at page {discovery_context.current_page-1}")
                         break
                 
                 # Apply max_items limit before storing
-                if max_items and total_discovered + len(pages) > max_items:
-                    remaining = max_items - total_discovered
-                    pages = pages[:remaining]
-                    self.logger.info(f"Limiting to {remaining} items to stay under max_items ({max_items}) for facet {facet_id}")
+                remaining_items = discovery_context.get_remaining_items()
+                if remaining_items is not None and len(pages) > remaining_items:
+                    pages = pages[:remaining_items]
+                    self.logger.info(f"Limiting to {remaining_items} items to stay under max_items ({max_items}) for facet {facet_id}")
                 
                 # Store discovered pages
                 self.logger.debug(f"About to store {len(pages)} pages for facet {facet_id}")
                 stored_count = self.storage.store_pages(pages)
                 self.logger.debug(f"Stored {stored_count} pages for facet {facet_id}")
-                total_discovered += stored_count
+                discovery_context.update_progress(stored_count)
                 
                 # Update facet progress with batch-level tracking
                 self.storage.update_facet_discovery(
                     facet_id, 
-                    items_discovered=total_discovered,
-                    current_page=page,
-                    batch_size=batch_size
+                    items_discovered=discovery_context.total_discovered,
+                    current_page=discovery_context.current_page,
+                    batch_size=discovery_context.batch_size
                 )
                 
                 # Call progress callback if provided
                 if progress_callback:
                     progress_callback({
                         'facet_id': facet_id,
-                        'page': page,
+                        'page': discovery_context.current_page,
                         'batch_items': stored_count,
-                        'total_discovered': total_discovered,
+                        'total_discovered': discovery_context.total_discovered,
                         'facet_value': facet['facet_value']
                     })
                 
                 # Provide periodic status updates for long-running facets
-                if page % 10 == 0 and page > 0:  # Every 10 pages
-                    self.logger.info(f"Facet {facet_id} ({facet['facet_value']}): page {page}, {total_discovered:,} items discovered so far")
+                if discovery_context.current_page % 10 == 0 and discovery_context.current_page > 0:  # Every 10 pages
+                    self.logger.info(f"Facet {facet_id} ({facet['facet_value']}): page {discovery_context.current_page}, {discovery_context.total_discovered:,} items discovered so far")
                 
-                self.logger.debug(f"Discovered {stored_count} items on page {page} for facet {facet_id}")
+                self.logger.debug(f"Discovered {stored_count} items on page {discovery_context.current_page} for facet {facet_id}")
                 
-                # Check if we've reached the limit
-                if max_items and total_discovered >= max_items:
-                    self.logger.info(f"Reached max items limit ({max_items}) for facet {facet_id}")
-                    break
-                
-                if len(pages) < batch_size:
+                # Check if we've reached the limit or last page
+                if len(pages) < discovery_context.batch_size:
                     # Last page
                     break
                 
-                page += 1
+                discovery_context.current_page += 1
             
             # Handle completion based on whether discovery was interrupted
-            if discovery_interrupted:
+            if discovery_context.discovery_interrupted:
                 # Discovery was interrupted - handle based on reason
-                if interruption_reason == 'captcha':
+                if discovery_context.interruption_reason == 'captcha':
                     # Mark for CAPTCHA recovery
                     import time
                     retry_time = time.time() + 3600  # 1 hour cooling-off
-                    retry_message = f"CAPTCHA interruption at page {page} - retry after: {time.ctime(retry_time)}"
+                    retry_message = f"CAPTCHA interruption at page {discovery_context.current_page} - retry after: {time.ctime(retry_time)}"
                     self.storage.update_facet_discovery(
                         facet_id,
                         status='captcha_retry',
                         error_message=retry_message,
-                        items_discovered=total_discovered,
-                        current_page=page  # This will set resume_from_page automatically
+                        items_discovered=discovery_context.total_discovered,
+                        current_page=discovery_context.current_page  # This will set resume_from_page automatically
                     )
-                    self.logger.info(f"Marked facet {facet_id} for CAPTCHA retry (discovered {total_discovered} items, resume from page {page})")
-                elif interruption_reason == 'timeout' and total_discovered > 0:
+                    self.logger.info(f"Marked facet {facet_id} for CAPTCHA retry (discovered {discovery_context.total_discovered} items, resume from page {discovery_context.current_page})")
+                elif discovery_context.interruption_reason == 'timeout' and discovery_context.total_discovered > 0:
                     # Partial completion due to timeouts
                     self.storage.update_facet_discovery(
                         facet_id,
-                        actual_items=total_discovered,
-                        items_discovered=total_discovered,
+                        actual_items=discovery_context.total_discovered,
+                        items_discovered=discovery_context.total_discovered,
                         status='completed',
-                        error_message=f"Completed with timeouts at page {page}"
+                        error_message=f"Completed with timeouts at page {discovery_context.current_page}"
                     )
-                    self.logger.info(f"Marked facet {facet_id} as completed with timeouts ({total_discovered} items)")
+                    self.logger.info(f"Marked facet {facet_id} as completed with timeouts ({discovery_context.total_discovered} items)")
                 else:
                     # Other interruption with partial results
                     self.storage.update_facet_discovery(
                         facet_id,
                         status='needs_splitting',
-                        error_message=f"Interrupted by {interruption_reason} at page {page} - needs splitting",
-                        items_discovered=total_discovered,
-                        resume_from_page=page
+                        error_message=f"Interrupted by {discovery_context.interruption_reason} at page {discovery_context.current_page} - needs splitting",
+                        items_discovered=discovery_context.total_discovered,
+                        resume_from_page=discovery_context.current_page
                     )
-                    self.logger.info(f"Marked facet {facet_id} for splitting due to {interruption_reason} (discovered {total_discovered} items)")
+                    self.logger.info(f"Marked facet {facet_id} for splitting due to {discovery_context.interruption_reason} (discovered {discovery_context.total_discovered} items)")
             else:
                 # Normal completion
                 self.storage.update_facet_discovery(
                     facet_id, 
-                    actual_items=total_discovered,
-                    items_discovered=total_discovered,
+                    actual_items=discovery_context.total_discovered,
+                    items_discovered=discovery_context.total_discovered,
                     status='completed'
                 )
-                self.logger.info(f"Completed discovery for facet {facet_id}: {total_discovered} items")
+                self.logger.info(f"Completed discovery for facet {facet_id}: {discovery_context.total_discovered} items")
             
-            return total_discovered
+            return discovery_context.total_discovered
             
         except CaptchaHandlingException as e:
             self.logger.warning(f"CAPTCHA handling exception for facet {facet_id}: {e}")
@@ -644,8 +588,8 @@ class DiscoveryManager:
                     facet_id,
                     status='captcha_blocked',
                     error_message=f"Blocked by global CAPTCHA protection: {captcha_status.get('reason', 'CAPTCHA detected')}",
-                    items_discovered=total_discovered,
-                    current_page=page  # Preserve current page for resume
+                    items_discovered=discovery_context.total_discovered,
+                    current_page=discovery_context.current_page  # Preserve current page for resume
                 )
                 
                 # Re-raise to stop ALL discovery operations
@@ -660,11 +604,11 @@ class DiscoveryManager:
                     facet_id,
                     status='needs_splitting',
                     error_message=f"CAPTCHA-triggered splitting needed: {e}",
-                    items_discovered=total_discovered,
-                    actual_items=total_discovered
+                    items_discovered=discovery_context.total_discovered,
+                    actual_items=discovery_context.total_discovered
                 )
-                self.logger.info(f"Marked facet {facet_id} for splitting due to CAPTCHA (discovered {total_discovered} items)")
-                return total_discovered
+                self.logger.info(f"Marked facet {facet_id} for splitting due to CAPTCHA (discovered {discovery_context.total_discovered} items)")
+                return discovery_context.total_discovered
             else:
                 # Legacy handling - convert to global approach
                 self.logger.warning(f"Converting legacy CAPTCHA handling to global approach for facet {facet_id}")
@@ -672,8 +616,8 @@ class DiscoveryManager:
                     facet_id,
                     status='captcha_blocked',
                     error_message=f"Legacy CAPTCHA converted to global protection: {e}",
-                    items_discovered=total_discovered,
-                    current_page=page
+                    items_discovered=discovery_context.total_discovered,
+                    current_page=discovery_context.current_page
                 )
                 
                 # Re-raise as global CAPTCHA
@@ -686,6 +630,10 @@ class DiscoveryManager:
         except Exception as e:
             error_message = str(e)
             
+            # Ensure discovery_context is available for error handling
+            if 'discovery_context' not in locals():
+                discovery_context = FacetDiscoveryContext(facet, batch_size, max_items)
+            
             # Handle CAPTCHA-related errors from the old error format
             if 'captcha' in error_message.lower():
                 self.logger.warning(f"Legacy CAPTCHA error for facet {facet_id}: {e}")
@@ -697,25 +645,25 @@ class DiscoveryManager:
                     facet_id,
                     status='captcha_retry',
                     error_message=retry_message,
-                    items_discovered=total_discovered
+                    items_discovered=discovery_context.total_discovered
                 )
-                self.logger.info(f"Scheduled facet {facet_id} for CAPTCHA retry due to legacy error (discovered {total_discovered} items)")
-                return total_discovered
+                self.logger.info(f"Scheduled facet {facet_id} for CAPTCHA retry due to legacy error (discovered {discovery_context.total_discovered} items)")
+                return discovery_context.total_discovered
             
             # Handle timeout errors more gracefully
             elif 'timeout' in error_message.lower():
                 self.logger.warning(f"Timeout discovering content for facet {facet_id}. Consider using smaller batches or more specific searches.")
                 # Mark as partial completion if we discovered some items
-                if total_discovered > 0:
+                if discovery_context.total_discovered > 0:
                     self.storage.update_facet_discovery(
                         facet_id,
-                        actual_items=total_discovered,
-                        items_discovered=total_discovered,
+                        actual_items=discovery_context.total_discovered,
+                        items_discovered=discovery_context.total_discovered,
                         status='completed',
                         error_message=f"Completed with timeouts: {error_message}"
                     )
-                    self.logger.info(f"Marked facet {facet_id} as completed with {total_discovered} items despite timeouts")
-                    return total_discovered
+                    self.logger.info(f"Marked facet {facet_id} as completed with {discovery_context.total_discovered} items despite timeouts")
+                    return discovery_context.total_discovered
                 else:
                     self.storage.update_facet_discovery(
                         facet_id,
