@@ -623,22 +623,32 @@ class DiscoveryManager:
         except CaptchaHandlingException as e:
             self.logger.warning(f"CAPTCHA handling exception for facet {facet_id}: {e}")
             
-            # Handle CAPTCHA exceptions with automatic recovery strategies
-            if e.retry_strategy == 'persistent_captcha_state':
-                # Persistent CAPTCHA state detected - need longer cooling-off
-                import time
-                cooling_hours = e.suggested_params.get('cooling_off_hours', 2)
-                retry_time = time.time() + (cooling_hours * 3600)
-                retry_message = f"Persistent CAPTCHA state - extended cooling-off needed: {e}. Retry after: {time.ctime(retry_time)}"
+            # Handle CAPTCHA exceptions with global cooling-off approach
+            if e.retry_strategy == 'global_cooling_off':
+                # Global CAPTCHA state - ALL discovery operations are blocked
+                captcha_status = e.suggested_params
+                
+                self.logger.warning(
+                    f"Global CAPTCHA protection active. "
+                    f"Blocking ALL discovery operations. "
+                    f"Reason: {captcha_status.get('reason', 'CAPTCHA detected')}"
+                )
+                
+                # Mark this facet as blocked by global CAPTCHA (not individual retry)
                 self.storage.update_facet_discovery(
                     facet_id,
-                    status='captcha_retry',
-                    error_message=retry_message,
+                    status='captcha_blocked',
+                    error_message=f"Blocked by global CAPTCHA protection: {captcha_status.get('reason', 'CAPTCHA detected')}",
                     items_discovered=total_discovered,
-                    current_page=page  # This will set resume_from_page automatically
+                    current_page=page  # Preserve current page for resume
                 )
-                self.logger.warning(f"Persistent CAPTCHA detected for facet {facet_id} - scheduled extended cooling-off for {e.suggested_params.get('cooling_off_hours', 2)} hours")
-                return total_discovered
+                
+                # Re-raise to stop ALL discovery operations
+                raise CaptchaHandlingException(
+                    f"Global CAPTCHA protection active - stopping ALL discovery operations",
+                    retry_strategy="global_cooling_off",
+                    suggested_params=captcha_status
+                )
             elif e.retry_strategy == 'facet_splitting_required':
                 # Mark for facet splitting instead of error
                 self.storage.update_facet_discovery(
@@ -651,19 +661,22 @@ class DiscoveryManager:
                 self.logger.info(f"Marked facet {facet_id} for splitting due to CAPTCHA (discovered {total_discovered} items)")
                 return total_discovered
             else:
-                # For other CAPTCHA strategies, mark for delayed retry
-                import time
-                cooling_hours = e.suggested_params.get('cooling_off_hours', 1)
-                retry_time = time.time() + (cooling_hours * 3600)
-                retry_message = f"CAPTCHA retry scheduled: {e}. Retry after: {time.ctime(retry_time)}"
+                # Legacy handling - convert to global approach
+                self.logger.warning(f"Converting legacy CAPTCHA handling to global approach for facet {facet_id}")
                 self.storage.update_facet_discovery(
                     facet_id,
-                    status='captcha_retry',
-                    error_message=retry_message,
-                    items_discovered=total_discovered
+                    status='captcha_blocked',
+                    error_message=f"Legacy CAPTCHA converted to global protection: {e}",
+                    items_discovered=total_discovered,
+                    current_page=page
                 )
-                self.logger.info(f"Scheduled facet {facet_id} for CAPTCHA retry (discovered {total_discovered} items)")
-                return total_discovered
+                
+                # Re-raise as global CAPTCHA
+                raise CaptchaHandlingException(
+                    f"Legacy CAPTCHA converted to global protection",
+                    retry_strategy="global_cooling_off",
+                    suggested_params={'reason': 'Legacy CAPTCHA detection'}
+                )
                 
         except Exception as e:
             error_message = str(e)

@@ -18,6 +18,99 @@ import atexit
 import random
 
 
+class GlobalCaptchaManager:
+    """
+    Singleton class to manage global CAPTCHA state across all discovery operations.
+    
+    When any facet hits CAPTCHA, ALL discovery operations are blocked until
+    sufficient cooling-off time has passed.
+    """
+    _instance = None
+    _lock = threading.Lock()
+    
+    def __new__(cls):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+        return cls._instance
+    
+    def __init__(self):
+        if hasattr(self, '_initialized'):
+            return
+            
+        self.last_captcha_time = None
+        self.base_cooling_off_hours = 1.0
+        self.cooling_off_multiplier = 1.0
+        self.consecutive_captchas = 0
+        self.logger = logging.getLogger(__name__)
+        self._initialized = True
+    
+    def record_captcha(self, context: str = "unknown"):
+        """Record that a CAPTCHA was encountered, triggering global cooling-off."""
+        current_time = time.time()
+        
+        # Check if this is a consecutive CAPTCHA (within 2 hours of last one)
+        if self.last_captcha_time and (current_time - self.last_captcha_time) < 7200:
+            self.consecutive_captchas += 1
+            # Escalate cooling-off period for consecutive CAPTCHAs
+            self.cooling_off_multiplier = min(4.0, 1.5 ** self.consecutive_captchas)
+        else:
+            # Reset consecutive count if enough time has passed
+            self.consecutive_captchas = 1
+            self.cooling_off_multiplier = 1.0
+        
+        self.last_captcha_time = current_time
+        cooling_off_hours = self.base_cooling_off_hours * self.cooling_off_multiplier
+        
+        self.logger.warning(
+            f"GLOBAL CAPTCHA triggered from {context}. "
+            f"Consecutive: {self.consecutive_captchas}, "
+            f"Cooling-off: {cooling_off_hours:.1f} hours, "
+            f"Resume after: {time.ctime(current_time + cooling_off_hours * 3600)}"
+        )
+    
+    def can_make_requests(self) -> tuple[bool, str]:
+        """
+        Check if any requests can be made currently.
+        
+        Returns:
+            (can_proceed, reason) - True if requests allowed, False with reason if blocked
+        """
+        if self.last_captcha_time is None:
+            return True, "No previous CAPTCHA"
+        
+        current_time = time.time()
+        cooling_off_hours = self.base_cooling_off_hours * self.cooling_off_multiplier
+        required_wait_time = self.last_captcha_time + (cooling_off_hours * 3600)
+        
+        if current_time >= required_wait_time:
+            return True, "Cooling-off period completed"
+        else:
+            remaining_minutes = (required_wait_time - current_time) / 60
+            return False, f"Global cooling-off active: {remaining_minutes:.1f} minutes remaining"
+    
+    def get_status(self) -> Dict:
+        """Get current global CAPTCHA status."""
+        can_proceed, reason = self.can_make_requests()
+        
+        return {
+            'blocked': not can_proceed,
+            'reason': reason,
+            'last_captcha_time': self.last_captcha_time,
+            'consecutive_captchas': self.consecutive_captchas,
+            'cooling_off_hours': self.base_cooling_off_hours * self.cooling_off_multiplier if self.last_captcha_time else 0,
+            'cooling_off_multiplier': self.cooling_off_multiplier
+        }
+    
+    def reset_state(self):
+        """Reset CAPTCHA state (for testing or manual override)."""
+        self.logger.info("Manually resetting global CAPTCHA state")
+        self.last_captcha_time = None
+        self.consecutive_captchas = 0
+        self.cooling_off_multiplier = 1.0
+
+
 class CaptchaHandlingException(Exception):
     """Custom exception for CAPTCHA scenarios that need special handling."""
     def __init__(self, message, retry_strategy=None, suggested_params=None):
@@ -81,6 +174,9 @@ class RateLimitedRequestManager:
         self.consecutive_captchas = 0
         self.session_start_time = time.time()
         self.immediate_captcha_detected = False
+        
+        # Global CAPTCHA manager
+        self.global_captcha_manager = GlobalCaptchaManager()
         
         self.logger = logging.getLogger(__name__)
         self.logger.info(f"Initialized rate-limited client: max {max_requests_per_minute} req/min")
@@ -354,6 +450,15 @@ class RateLimitedRequestManager:
         Make a rate-limited request to the API with retries and 429 handling.
         All requests go through this central bottleneck.
         """
+        # Check global CAPTCHA state before making any requests
+        can_proceed, reason = self.global_captcha_manager.can_make_requests()
+        if not can_proceed:
+            raise CaptchaHandlingException(
+                f"Request blocked by global CAPTCHA protection: {reason}",
+                retry_strategy="global_cooling_off",
+                suggested_params={'reason': reason}
+            )
+        
         url = urljoin(self.base_url, endpoint)
         
         for attempt in range(self.max_retries):
@@ -387,39 +492,18 @@ class RateLimitedRequestManager:
                     self.consecutive_captchas += 1
                     self.last_captcha_time = time.time()
                     
+                    # Record global CAPTCHA state
+                    context = f"endpoint={endpoint}, attempt={attempt + 1}"
+                    self.global_captcha_manager.record_captcha(context)
+                    
                     self.logger.warning(f"CAPTCHA detected on attempt {attempt + 1} (total: {self.captcha_count}, consecutive: {self.consecutive_captchas})")
                     
-                    # Determine retry strategy based on attempt and CAPTCHA history
-                    retry_strategy = self._determine_captcha_strategy(attempt, params)
-                    
-                    if retry_strategy['action'] == 'retry':
-                        wait_time = retry_strategy['wait_time']
-                        self.logger.warning(f"Strategy: {retry_strategy['strategy']} - Waiting {wait_time/60:.1f} minutes before retry...")
-                        
-                        # Apply adaptive rate limiting
-                        self.adaptive_delay_multiplier = min(self.adaptive_delay_multiplier * 1.5, 3.0)
-                        
-                        time.sleep(wait_time)
-                        
-                        # Modify request parameters if suggested
-                        if retry_strategy.get('modify_params'):
-                            params = retry_strategy['modify_params'](params)
-                            self.logger.info(f"Modified request parameters for CAPTCHA avoidance")
-                        
-                        continue
-                    elif retry_strategy['action'] == 'suggest_alternatives':
-                        # Raise special exception with suggested alternatives
-                        raise CaptchaHandlingException(
-                            retry_strategy['message'],
-                            retry_strategy=retry_strategy['strategy'],
-                            suggested_params=retry_strategy.get('suggested_params')
-                        )
-                    else:
-                        # Final failure
-                        raise requests.exceptions.RequestException(
-                            f"CAPTCHA detected by LOC API after {self.max_retries} attempts. "
-                            f"Strategy exhausted: {retry_strategy['strategy']}. Manual intervention required."
-                        )
+                    # For any CAPTCHA, immediately fail with global cooling-off requirement
+                    raise CaptchaHandlingException(
+                        f"CAPTCHA detected - global cooling-off period required",
+                        retry_strategy="global_cooling_off",
+                        suggested_params=self.global_captcha_manager.get_status()
+                    )
                 
                 response.raise_for_status()
                 self.logger.debug(f"Request successful: {endpoint}")

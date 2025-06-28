@@ -9,7 +9,7 @@ import json
 from typing import List, Dict
 from tqdm import tqdm
 from .config import Config
-from .rate_limited_client import LocApiClient
+from .rate_limited_client import LocApiClient, CaptchaHandlingException
 from .processor import NewsDataProcessor
 from .storage import NewsStorage
 from .discovery import DiscoveryManager
@@ -715,6 +715,24 @@ def auto_discover_facets(auto_enqueue, batch_size, max_items, skip_errors, timeo
     
     click.echo("🔍 Starting systematic facet discovery...")
     
+    # Check global CAPTCHA status first
+    from newsagger.rate_limited_client import GlobalCaptchaManager
+    global_captcha = GlobalCaptchaManager()
+    captcha_status = global_captcha.get_status()
+    
+    if captcha_status['blocked']:
+        click.echo(f"🛑 DISCOVERY BLOCKED: {captcha_status['reason']}")
+        click.echo(f"   Consecutive CAPTCHAs: {captcha_status['consecutive_captchas']}")
+        click.echo(f"   Cooling-off period: {captcha_status['cooling_off_hours']:.1f} hours")
+        if captcha_status['last_captcha_time']:
+            import time
+            last_captcha = time.ctime(captcha_status['last_captcha_time'])
+            click.echo(f"   Last CAPTCHA: {last_captcha}")
+        click.echo(f"\n💡 To override: python main.py reset-captcha-state")
+        return
+    else:
+        click.echo(f"✅ Global CAPTCHA status: {captcha_status['reason']}")
+    
     # Proactive CAPTCHA interruption detection and fix
     click.echo("🛠️  Checking for incorrectly completed facets...")
     try:
@@ -856,6 +874,34 @@ def auto_discover_facets(auto_enqueue, batch_size, max_items, skip_errors, timeo
                         main_pbar.set_postfix(discovered=total_discovered, enqueued=total_enqueued, errors=errors_count)
                     else:
                         main_pbar.set_postfix(discovered=total_discovered, errors=errors_count)
+                
+                except CaptchaHandlingException as e:
+                    # Handle global CAPTCHA - stop all discovery
+                    if hasattr(signal, 'SIGALRM'):
+                        signal.alarm(0)
+                    if batch_pbar:
+                        batch_pbar.close()
+                    
+                    click.echo(f"\n🛑 GLOBAL CAPTCHA DETECTED - Stopping all discovery operations")
+                    click.echo(f"   Facet {facet['id']} ({facet['facet_value']}) triggered CAPTCHA protection")
+                    
+                    captcha_status = global_captcha.get_status()
+                    click.echo(f"   Global cooling-off: {captcha_status['cooling_off_hours']:.1f} hours")
+                    click.echo(f"   Consecutive CAPTCHAs: {captcha_status['consecutive_captchas']}")
+                    
+                    if captcha_status['last_captcha_time']:
+                        import time
+                        resume_time = captcha_status['last_captcha_time'] + (captcha_status['cooling_off_hours'] * 3600)
+                        click.echo(f"   Resume after: {time.ctime(resume_time)}")
+                    
+                    click.echo(f"\n📊 Progress before CAPTCHA:")
+                    click.echo(f"   Facets processed: {i}")
+                    click.echo(f"   Items discovered: {total_discovered:,}")
+                    if auto_enqueue:
+                        click.echo(f"   Items enqueued: {total_enqueued:,}")
+                    
+                    click.echo(f"\n💡 Resume later with: python main.py auto-discover-facets")
+                    break  # Stop all discovery operations
                 
                 except (TimeoutError, Exception) as e:
                     # Cancel the timeout
@@ -2238,6 +2284,40 @@ def download_priority(priority, queue_type, max_items, download_dir, file_types)
         
     except Exception as e:
         click.echo(f"❌ Priority download failed: {e}")
+
+
+@cli.command()  
+def reset_captcha_state():
+    """Reset global CAPTCHA protection state (use with caution)."""
+    from newsagger.rate_limited_client import GlobalCaptchaManager
+    
+    global_captcha = GlobalCaptchaManager()
+    captcha_status = global_captcha.get_status()
+    
+    if not captcha_status['blocked']:
+        click.echo("✅ Global CAPTCHA state is not currently blocked")
+        click.echo(f"   Status: {captcha_status['reason']}")
+        return
+    
+    click.echo(f"🛑 Current CAPTCHA state:")
+    click.echo(f"   Status: {captcha_status['reason']}")
+    click.echo(f"   Consecutive CAPTCHAs: {captcha_status['consecutive_captchas']}")
+    click.echo(f"   Cooling-off period: {captcha_status['cooling_off_hours']:.1f} hours")
+    
+    if captcha_status['last_captcha_time']:
+        import time
+        last_captcha = time.ctime(captcha_status['last_captcha_time'])
+        click.echo(f"   Last CAPTCHA: {last_captcha}")
+    
+    click.echo(f"\n⚠️  WARNING: Resetting CAPTCHA state may trigger immediate CAPTCHA again!")
+    click.echo(f"   Only reset if you're confident the API cooling-off period has passed.")
+    
+    if click.confirm("\nReset global CAPTCHA state?"):
+        global_captcha.reset_state()
+        click.echo("✅ Global CAPTCHA state has been reset")
+        click.echo("💡 You can now resume discovery operations")
+    else:
+        click.echo("Cancelled")
 
 
 if __name__ == '__main__':
