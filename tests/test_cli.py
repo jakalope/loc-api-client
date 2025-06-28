@@ -207,18 +207,20 @@ class TestCLI:
         mock_processor.return_value = mock_processor_instance
         
         mock_storage_instance = Mock()
+        mock_storage_instance.get_search_facets.return_value = []
         mock_storage.return_value = mock_storage_instance
         
         with patch('newsagger.cli.DiscoveryManager') as mock_discovery:
             mock_discovery_instance = Mock()
             mock_discovery_instance.create_date_range_facets.return_value = [1, 2, 3]
+            mock_discovery_instance.auto_discover_facets.return_value = 10
             mock_discovery.return_value = mock_discovery_instance
             
             result = self.runner.invoke(cli, ['create-facets', '--start-year', '1900', '--end-year', '1905'])
             
             assert result.exit_code == 0
-            assert "Creating date facets from 1900 to 1905" in result.output
-            mock_discovery_instance.create_date_range_facets.assert_called_once_with(1900, 1905, 1)
+            assert "Creating 6 date facets from 1900 to 1905" in result.output
+            mock_discovery_instance.create_date_range_facets.assert_called_once_with(1900, 1905, facet_size_years=1, estimate_items=False)
             
     @patch('newsagger.cli.Config')
     @patch('newsagger.cli.LocApiClient')
@@ -415,7 +417,7 @@ class TestCLI:
             
             assert result.exit_code == 0
             assert "Setting up automated download workflow" in result.output
-            mock_discovery_instance.create_date_range_facets.assert_called_once_with(1906, 1907, facet_size=1)
+            mock_discovery_instance.create_date_range_facets.assert_called_once_with(1906, 1907, facet_size_years=1, estimate_items=False)
 
     @patch('newsagger.cli.Config')
     @patch('newsagger.cli.LocApiClient')

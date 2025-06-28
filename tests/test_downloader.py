@@ -169,10 +169,11 @@ class TestDownloadProcessor:
     def test_download_file_success(self, mock_get, downloader, temp_dir):
         """Test successful file download."""
         # Mock successful HTTP response
+        test_content = b'test content chunk'
         mock_response = Mock()
         mock_response.raise_for_status.return_value = None
-        mock_response.headers = {'content-length': '1024'}
-        mock_response.iter_content.return_value = [b'test content chunk']
+        mock_response.headers = {'content-length': str(len(test_content))}
+        mock_response.iter_content.return_value = [test_content]
         mock_get.return_value = mock_response
         
         file_path = Path(temp_dir) / 'test_file.pdf'
@@ -212,10 +213,11 @@ class TestDownloadProcessor:
     def test_download_page_success(self, mock_get, downloader, mock_storage, temp_dir):
         """Test successful page download."""
         # Mock successful HTTP responses
+        test_content = b'test pdf content'
         mock_response = Mock()
         mock_response.raise_for_status.return_value = None
-        mock_response.headers = {'content-length': '2048'}
-        mock_response.iter_content.return_value = [b'test pdf content']
+        mock_response.headers = {'content-length': str(len(test_content))}
+        mock_response.iter_content.return_value = [test_content]
         mock_get.return_value = mock_response
         
         result = downloader._download_page('test_page_1')
@@ -374,7 +376,7 @@ class TestDownloadProcessor:
         """Test getting comprehensive download statistics."""
         # Create some test files to calculate disk usage
         test_file = Path(temp_dir) / 'test_file.txt'
-        test_file.write_text('test content')
+        test_file.write_text('test content with some meaningful size to ensure non-zero disk usage' * 1000)  # Make it larger
         
         stats = downloader.get_download_stats()
         

@@ -112,9 +112,10 @@ class TestDiscoveryAutomation:
         # Check API was called with correct parameters
         self.mock_api_client.search_pages.assert_called_once()
         call_args = self.mock_api_client.search_pages.call_args[1]
-        assert call_args['dates'] == '1906/1906'
-        assert call_args['c'] == 50
-        assert call_args['sp'] == 1
+        assert call_args['date1'] == '1906'
+        assert call_args['date2'] == '1906'
+        assert call_args['rows'] == 50
+        assert call_args['page'] == 1
         
         # Check facet status was updated
         facet = self.storage.get_search_facet(facet_id)
@@ -124,6 +125,10 @@ class TestDiscoveryAutomation:
     
     def test_discover_facet_content_state_facet(self):
         """Test discovering content for a state facet."""
+        # Add mock periodicals for California
+        periodicals = [{'lccn': 'sn84038012', 'state': 'California', 'title': 'Test Paper'}]
+        self.storage.store_periodicals(periodicals)
+        
         # Create a test facet
         facet_id = self.storage.create_search_facet(
             'state', 'California', '', 500
@@ -142,10 +147,11 @@ class TestDiscoveryAutomation:
         # Verify results
         assert discovered_count == 0
         
-        # Check API was called with state parameter
+        # Check API was called with LCCN-based search (not state parameter)
         self.mock_api_client.search_pages.assert_called_once()
         call_args = self.mock_api_client.search_pages.call_args[1]
-        assert call_args['state'] == 'California'
+        assert 'andtext' in call_args
+        assert 'sn84038012' in call_args['andtext']
     
     def test_discover_facet_content_with_max_items(self):
         """Test discovery with max items limit."""
@@ -406,8 +412,8 @@ class TestDiscoveryAutomation:
         
         # Check pagination parameters
         calls = self.mock_api_client.search_pages.call_args_list
-        assert calls[0][1]['sp'] == 1  # First page
-        assert calls[1][1]['sp'] == 2  # Second page
+        assert calls[0][1]['page'] == 1  # First page
+        assert calls[1][1]['page'] == 2  # Second page
     
     def test_discover_facet_content_query_facet(self):
         """Test discovering content for a query-based facet."""
@@ -443,5 +449,5 @@ class TestDiscoveryAutomation:
         
         # Verify query parameter was used
         call_args = self.mock_api_client.search_pages.call_args[1]
-        assert call_args['q'] == 'earthquake'
+        assert call_args['andtext'] == 'earthquake'
         assert discovered_count == 1
