@@ -576,7 +576,7 @@ class TestProgressTracker:
     
     def test_set_description(self):
         """Test setting custom description."""
-        with patch('src.newsagger.utils.tqdm') as mock_tqdm:
+        with patch('src.newsagger.utils.progress.tqdm') as mock_tqdm:
             mock_pbar = Mock()
             mock_tqdm.return_value = mock_pbar
             
@@ -586,7 +586,7 @@ class TestProgressTracker:
     
     def test_set_custom_postfix(self):
         """Test setting custom postfix information."""
-        with patch('src.newsagger.utils.tqdm') as mock_tqdm:
+        with patch('src.newsagger.utils.progress.tqdm') as mock_tqdm:
             mock_pbar = Mock()
             mock_tqdm.return_value = mock_pbar
             
@@ -612,7 +612,7 @@ class TestProgressTracker:
     
     def test_no_rate_display(self):
         """Test progress tracker without rate display."""
-        with patch('src.newsagger.utils.tqdm') as mock_tqdm:
+        with patch('src.newsagger.utils.progress.tqdm') as mock_tqdm:
             mock_pbar = Mock()
             mock_tqdm.return_value = mock_pbar
             
@@ -627,7 +627,7 @@ class TestProgressTracker:
     
     def test_unknown_total(self):
         """Test progress tracker with unknown total."""
-        with patch('src.newsagger.utils.tqdm') as mock_tqdm:
+        with patch('src.newsagger.utils.progress.tqdm') as mock_tqdm:
             mock_pbar = Mock()
             mock_tqdm.return_value = mock_pbar
             
@@ -638,7 +638,7 @@ class TestProgressTracker:
     
     def test_custom_unit(self):
         """Test progress tracker with custom unit."""
-        with patch('src.newsagger.utils.tqdm') as mock_tqdm:
+        with patch('src.newsagger.utils.progress.tqdm') as mock_tqdm:
             mock_pbar = Mock()
             mock_tqdm.return_value = mock_pbar
             
@@ -647,7 +647,7 @@ class TestProgressTracker:
     
     def test_context_manager_cleanup(self):
         """Test that progress bar is properly closed on exit."""
-        with patch('src.newsagger.utils.tqdm') as mock_tqdm:
+        with patch('src.newsagger.utils.progress.tqdm') as mock_tqdm:
             mock_pbar = Mock()
             mock_tqdm.return_value = mock_pbar
             
