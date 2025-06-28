@@ -182,6 +182,51 @@ self.storage.update_facet_discovery(
 - Monitor with `discovery-status` and `download-stats`
 - Test priority downloads before bulk processing
 
+### **🚨 CRITICAL: Test Coverage and Quality Standards**
+
+**MANDATORY before every commit:**
+
+```bash
+# ALWAYS run the full test suite before committing
+source venv/bin/activate
+python run_tests.py
+
+# Check current coverage
+python -m pytest --cov=src/newsagger --cov-report=term-missing
+```
+
+**Strict Requirements:**
+1. **🔴 Zero Test Failures**: All tests MUST pass (176/176 passing)
+2. **📊 Coverage Maintenance**: Test coverage MUST NOT decrease below current level (57% minimum)
+3. **🧪 New Code Coverage**: All new code MUST include comprehensive tests
+4. **⚡ Test Performance**: Tests should complete within reasonable time (< 5 minutes)
+
+**Before Committing Changes:**
+- ✅ Run `python run_tests.py` - all tests must pass
+- ✅ Check coverage with `--cov-report=term-missing` - coverage must not drop
+- ✅ Add tests for any new functionality
+- ✅ Fix any test failures before pushing
+- ✅ Ensure tests are reliable and don't flake
+
+**Coverage Standards by Module:**
+- `config.py`: 100% (maintain)
+- `processor.py`: 90%+ (maintain)
+- `downloader.py`: 85%+ (maintain)
+- `storage.py`: 70%+ (maintain)
+- `discovery.py`: 65%+ (maintain)
+- `api_client.py`: 70%+ (maintain)
+- `rate_limited_client.py`: 65%+ (maintain)
+- `cli.py`: 36%+ (target for improvement)
+
+**Never commit if:**
+- Any test is failing
+- Coverage percentage decreases
+- New functionality lacks tests
+- Tests are unreliable or flaky
+
+The test suite provides critical confidence in code quality and prevents regressions. 
+Maintaining test standards ensures the project remains stable and maintainable.
+
 ## Maintenance and Extensions
 
 ### **When Adding Features:**
