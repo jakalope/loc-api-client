@@ -499,14 +499,19 @@ class DiscoveryManager:
                         
                     self.logger.debug(f"Found {len(pages)} pages on page {page} for facet {facet_id}")
                     
+                except CaptchaHandlingException:
+                    # Let CAPTCHA exceptions propagate to the global handler
+                    # Don't catch these - they need to bubble up to stop ALL discovery
+                    raise
+                    
                 except Exception as e:
                     self.logger.warning(f"Search failed for facet {facet_id} page {page}: {e}")
                     
-                    # Check if this is a CAPTCHA-related error
+                    # Check if this is a legacy CAPTCHA-related error
                     if 'captcha' in str(e).lower():
                         discovery_interrupted = True
                         interruption_reason = 'captcha'
-                        self.logger.warning(f"CAPTCHA interruption on facet {facet_id} page {page} - marking for recovery")
+                        self.logger.warning(f"Legacy CAPTCHA interruption on facet {facet_id} page {page} - marking for recovery")
                         break
                     # For certain errors, we should stop rather than continue
                     elif 'timeout' in str(e).lower() or 'connection' in str(e).lower():
