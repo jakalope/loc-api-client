@@ -4,3 +4,15 @@ downloads/
 data/
 newsagger.log
 .DS_Store
+
+# Coverage files
+.coverage
+htmlcov/
+
+# Environment configuration
+.env
+.env.local
+.env.*.local
+
+# Test artifacts
+.pytest_cache/
