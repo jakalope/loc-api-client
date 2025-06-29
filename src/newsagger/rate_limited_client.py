@@ -221,7 +221,7 @@ class RateLimitedRequestManager:
                 oldest_request = min(self.request_count_window)
                 wait_time = 60 - (current_time - oldest_request) + 0.1  # Small buffer
                 if wait_time > 0:
-                    self.logger.info(f"Rate limiting: waiting {wait_time:.1f}s to respect {self.max_requests_per_minute}/min limit")
+                    self.logger.debug(f"Rate limiting: waiting {wait_time:.1f}s to respect {self.max_requests_per_minute}/min limit")
                     time.sleep(wait_time)
                     current_time = time.time()
             

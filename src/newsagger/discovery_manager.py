@@ -8,6 +8,7 @@ for systematic downloading from the Library of Congress API.
 import logging
 from typing import Dict, List, Optional, Tuple, Generator
 from datetime import datetime
+from tqdm import tqdm
 from .rate_limited_client import LocApiClient, CaptchaHandlingException
 from .processor import NewsDataProcessor
 from .storage import NewsStorage
@@ -1156,8 +1157,26 @@ class DiscoveryManager:
         errors = 0
         
         try:
-            # Get batches using the new API method
-            for batch in self.api_client.get_all_batches():
+            # Get all batches first to know total count
+            self.logger.info("Getting list of available batches...")
+            all_batches = list(self.api_client.get_all_batches())
+            total_batches = len(all_batches)
+            
+            if max_batches:
+                total_batches = min(total_batches, max_batches)
+                all_batches = all_batches[:max_batches]
+            
+            self.logger.info(f"Will process {total_batches} of {len(all_batches)} available batches")
+            
+            # Create progress bar for batches
+            batch_pbar = tqdm(
+                total=total_batches,
+                desc="Processing batches",
+                unit="batch",
+                position=0
+            )
+            
+            for batch in all_batches:
                 if max_batches and processed_batches >= max_batches:
                     break
                 
@@ -1166,7 +1185,14 @@ class DiscoveryManager:
                     batch_name = batch.get('name', 'unknown')
                     batch_url = batch.get('url', '')
                     
-                    self.logger.info(f"Processing batch {processed_batches + 1}: {batch_name}")
+                    batch_page_count = batch.get('page_count', 0)
+                    
+                    # Update batch progress bar
+                    batch_pbar.set_description(f"Processing {batch_name[:20]}...")
+                    batch_pbar.set_postfix({
+                        'pages': f'{batch_page_count:,}',
+                        'found': f'{discovered_pages:,}'
+                    })
                     
                     # Get detailed batch information to find pages
                     if batch_url:
@@ -1184,8 +1210,19 @@ class DiscoveryManager:
                         
                         # Process issues from this batch (batches contain issues, not pages directly)
                         batch_issues = batch_details.get('issues', [])
+                        batch_discovered = 0
+                        batch_enqueued = 0
                         
-                        for issue_data in batch_issues:
+                        # Create progress bar for issues in this batch
+                        issue_pbar = tqdm(
+                            total=len(batch_issues),
+                            desc=f"Issues in {batch_name[:15]}",
+                            unit="issue",
+                            position=1,
+                            leave=False
+                        )
+                        
+                        for issue_idx, issue_data in enumerate(batch_issues, 1):
                             # Each issue has its own URL - we need to fetch it to get pages
                             issue_url = issue_data.get('url', '')
                             if issue_url:
@@ -1199,6 +1236,12 @@ class DiscoveryManager:
                                     # Get issue details which contain the actual pages
                                     issue_details = self.api_client._make_request(issue_endpoint)
                                     issue_pages = issue_details.get('pages', [])
+                                    
+                                    # Update issue progress bar
+                                    issue_pbar.set_postfix({
+                                        'pages': len(issue_pages),
+                                        'discovered': batch_discovered
+                                    })
                                     
                                     for page_data in issue_pages:
                                         # Each page_data has 'url' and 'sequence' - we need full page details
@@ -1222,6 +1265,7 @@ class DiscoveryManager:
                                                 page = self.processor.process_page_details(page_details, page_url)
                                                 if page:
                                                     discovered_pages += 1
+                                                    batch_discovered += 1
                                                     
                                                     # Auto-enqueue if requested
                                                     if auto_enqueue:
@@ -1232,14 +1276,29 @@ class DiscoveryManager:
                                                         )
                                                         if queue_result:
                                                             enqueued_pages += 1
+                                                            batch_enqueued += 1
                                             except Exception as e:
                                                 self.logger.error(f"Error processing page {page_url}: {e}")
                                                 continue
                                 except Exception as e:
                                     self.logger.error(f"Error processing issue {issue_url}: {e}")
                                     continue
+                                finally:
+                                    # Update issue progress bar
+                                    issue_pbar.update(1)
                     
                     processed_batches += 1
+                    
+                    # Close issue progress bar
+                    issue_pbar.close()
+                    
+                    # Update batch progress bar
+                    batch_pbar.update(1)
+                    batch_pbar.set_postfix({
+                        'batch_pages': f'{batch_discovered:,}',
+                        'total_found': f'{discovered_pages:,}',
+                        'enqueued': f'{enqueued_pages:,}' if auto_enqueue else 'N/A'
+                    })
                     
                     # Progress callback
                     if progress_callback:
@@ -1253,11 +1312,21 @@ class DiscoveryManager:
                 except Exception as e:
                     self.logger.error(f"Error processing batch {batch_name}: {e}")
                     errors += 1
+                    # Still update batch progress bar on error
+                    batch_pbar.update(1)
                     continue
+            
+            # Close batch progress bar
+            batch_pbar.close()
         
         except Exception as e:
             self.logger.error(f"Error in batch discovery: {e}")
             errors += 1
+            # Close progress bars on major error
+            try:
+                batch_pbar.close()
+            except:
+                pass
         
         stats = {
             'processed_batches': processed_batches,
