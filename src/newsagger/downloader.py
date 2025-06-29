@@ -82,14 +82,15 @@ class DownloadProcessor:
                 "dry_run": True
             }
         
-        # Process downloads with progress tracking
+        # Process downloads with progress tracking and batched database updates
         total_size_mb = 0
         start_time = datetime.now()
+        batch_updates = []  # Store updates to batch process
         
         with ProgressTracker(total=len(queue_items), desc="Processing downloads", unit="files") as progress:
-            for item in queue_items:
+            for i, item in enumerate(queue_items):
                 try:
-                    # Mark item as active
+                    # Mark item as active (immediate update for tracking)
                     self.storage.update_queue_item(item['id'], status='active')
                     
                     # Process the download based on queue type
@@ -98,36 +99,49 @@ class DownloadProcessor:
                     if result['success']:
                         total_size_mb += result.get('size_mb', 0)
                         
-                        # Mark as completed
-                        self.storage.update_queue_item(
-                            item['id'], 
-                            status='completed',
-                            progress_percent=100.0
-                        )
+                        # Queue update for batch processing
+                        batch_updates.append({
+                            'id': item['id'],
+                            'status': 'completed',
+                            'progress_percent': 100.0,
+                            'error_message': None
+                        })
                         
                         # Update progress with custom postfix for size
                         progress.update(success=True)
                         progress.set_postfix(size_mb=f"{total_size_mb:.1f}")
                     else:
-                        self.storage.update_queue_item(
-                            item['id'],
-                            status='failed',
-                            error_message=result.get('error', 'Unknown error')
-                        )
+                        # Queue update for batch processing
+                        batch_updates.append({
+                            'id': item['id'],
+                            'status': 'failed',
+                            'error_message': result.get('error', 'Unknown error'),
+                            'progress_percent': 0
+                        })
                         
                         progress.update(success=False)
                         progress.set_postfix(size_mb=f"{total_size_mb:.1f}")
                     
+                    # Process batch updates every 10 items or at the end
+                    if len(batch_updates) >= 10 or i == len(queue_items) - 1:
+                        self._process_batch_updates(batch_updates)
+                        batch_updates = []
+                    
                 except Exception as e:
                     self.logger.error(f"Error processing queue item {item['id']}: {e}")
-                    self.storage.update_queue_item(
-                        item['id'],
-                        status='failed',
-                        error_message=str(e)
-                    )
+                    batch_updates.append({
+                        'id': item['id'],
+                        'status': 'failed',
+                        'error_message': str(e),
+                        'progress_percent': 0
+                    })
                     
                     progress.update(success=False)
                     progress.set_postfix(size_mb=f"{total_size_mb:.1f}")
+            
+            # Process any remaining batch updates
+            if batch_updates:
+                self._process_batch_updates(batch_updates)
         
         # Get final statistics from progress tracker and build return stats
         final_stats = progress.get_stats()
@@ -183,7 +197,7 @@ class DownloadProcessor:
                 'error': f"Page {item_id} not found in storage"
             }
         
-        # Check if already downloaded
+        # Quick check if already downloaded to avoid unnecessary work
         if page_data.get('downloaded'):
             self.logger.debug(f"Page {item_id} already downloaded, skipping")
             return {
@@ -381,10 +395,10 @@ class DownloadProcessor:
         # Get file size from headers
         total_size = int(response.headers.get('content-length', 0))
         
-        # Write file with progress tracking
+        # Write file with progress tracking and larger chunks
         downloaded_size = 0
         with open(local_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
+            for chunk in response.iter_content(chunk_size=65536):  # 64KB chunks
                 if chunk:
                     f.write(chunk)
                     downloaded_size += len(chunk)
@@ -449,10 +463,10 @@ class DownloadProcessor:
                 # Get file size
                 total_size = int(response.headers.get('content-length', 0))
                 
-                # Write file
+                # Write file with larger chunks for better I/O performance
                 downloaded_size = 0
                 with open(local_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
+                    for chunk in response.iter_content(chunk_size=65536):  # 64KB chunks
                         if chunk:
                             f.write(chunk)
                             downloaded_size += len(chunk)
@@ -479,9 +493,9 @@ class DownloadProcessor:
                     'type': task.get('type', 'unknown')
                 }
         
-        # Execute downloads concurrently (max 3 threads for PDF/JP2/OCR)
+        # Execute downloads concurrently (increased workers for better throughput)
         results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
             future_to_task = {executor.submit(download_single_file, task): task for task in download_tasks}
             
             for future in concurrent.futures.as_completed(future_to_task):
@@ -567,6 +581,41 @@ class DownloadProcessor:
             )
         
         return {"reset": len(active_items)}
+    
+    def _process_batch_updates(self, updates: List[Dict]) -> None:
+        """Process a batch of queue item updates efficiently."""
+        if not updates:
+            return
+            
+        try:
+            # Use a single transaction for all updates
+            with self.storage._get_db_connection() as conn:
+                cursor = conn.cursor()
+                for update in updates:
+                    cursor.execute(
+                        """
+                        UPDATE download_queue 
+                        SET status = ?, progress_percent = ?, error_message = ?, updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (update['status'], update.get('progress_percent'), 
+                         update.get('error_message'), update['id'])
+                    )
+                conn.commit()
+            self.logger.debug(f"Batch updated {len(updates)} queue items")
+        except Exception as e:
+            self.logger.error(f"Error in batch update: {e}")
+            # Fallback to individual updates if batch fails
+            for update in updates:
+                try:
+                    self.storage.update_queue_item(
+                        update['id'],
+                        status=update['status'],
+                        progress_percent=update.get('progress_percent'),
+                        error_message=update.get('error_message')
+                    )
+                except Exception as fallback_error:
+                    self.logger.error(f"Fallback update failed for {update['id']}: {fallback_error}")
     
     def get_download_stats(self) -> Dict:
         """Get comprehensive download statistics."""
