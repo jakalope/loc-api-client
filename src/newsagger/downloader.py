@@ -206,25 +206,32 @@ class DownloadProcessor:
         # Clean the item_id to make it safe for filenames
         safe_item_id = item_id.replace('/', '_').replace('\\', '_').replace(':', '_')
         
-        # Download PDF if available and requested
-        if 'pdf' in self.file_types and page_data.get('pdf_url'):
-            pdf_result = self._download_file(
-                page_data['pdf_url'],
-                download_path / f"{safe_item_id}.pdf"
-            )
-            if pdf_result['success']:
-                downloaded_files.append(pdf_result['file_path'])
-                total_size += pdf_result['size_mb']
+        # Prepare downloads for concurrent execution
+        download_tasks = []
         
-        # Download JP2 image if available and requested
+        # Add PDF download if available and requested
+        if 'pdf' in self.file_types and page_data.get('pdf_url'):
+            download_tasks.append({
+                'url': page_data['pdf_url'],
+                'path': download_path / f"{safe_item_id}.pdf",
+                'type': 'pdf'
+            })
+        
+        # Add JP2 download if available and requested
         if 'jp2' in self.file_types and page_data.get('jp2_url'):
-            jp2_result = self._download_file(
-                page_data['jp2_url'],
-                download_path / f"{safe_item_id}.jp2"
-            )
-            if jp2_result['success']:
-                downloaded_files.append(jp2_result['file_path'])
-                total_size += jp2_result['size_mb']
+            download_tasks.append({
+                'url': page_data['jp2_url'],
+                'path': download_path / f"{safe_item_id}.jp2",
+                'type': 'jp2'
+            })
+        
+        # Execute downloads concurrently for better performance
+        if download_tasks:
+            download_results = self._download_files_concurrent(download_tasks)
+            for result in download_results:
+                if result['success']:
+                    downloaded_files.append(result['file_path'])
+                    total_size += result['size_mb']
         
         # Save OCR text if available and requested
         if 'ocr' in self.file_types and page_data.get('ocr_text'):
@@ -390,6 +397,103 @@ class DownloadProcessor:
             )
         
         return downloaded_size
+    
+    def _download_files_concurrent(self, download_tasks: List[Dict]) -> List[Dict]:
+        """
+        Download multiple files concurrently for better performance.
+        
+        Args:
+            download_tasks: List of dicts with 'url', 'path', and 'type' keys
+            
+        Returns:
+            List of download results
+        """
+        import concurrent.futures
+        import threading
+        
+        # Create a session per thread to avoid conflicts
+        thread_local = threading.local()
+        
+        def get_session():
+            if not hasattr(thread_local, 'session'):
+                thread_local.session = requests.Session()
+                thread_local.session.headers.update({
+                    'User-Agent': 'Newsagger/0.1.0 (Educational Archive Tool)'
+                })
+            return thread_local.session
+        
+        def download_single_file(task):
+            """Download a single file using thread-local session."""
+            try:
+                url = task['url']
+                local_path = task['path']
+                file_type = task['type']
+                
+                # Check if file already exists
+                if local_path.exists():
+                    size_mb = local_path.stat().st_size / (1024 * 1024)
+                    return {
+                        'success': True,
+                        'file_path': str(local_path),
+                        'size_mb': size_mb,
+                        'skipped': True,
+                        'type': file_type
+                    }
+                
+                session = get_session()
+                
+                # Download with streaming
+                response = session.get(url, stream=True, timeout=120)
+                response.raise_for_status()
+                
+                # Get file size
+                total_size = int(response.headers.get('content-length', 0))
+                
+                # Write file
+                downloaded_size = 0
+                with open(local_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded_size += len(chunk)
+                
+                # Verify download
+                if total_size > 0 and downloaded_size != total_size:
+                    local_path.unlink()  # Remove incomplete file
+                    raise requests.exceptions.RequestException(
+                        f"Download incomplete: {downloaded_size}/{total_size} bytes"
+                    )
+                
+                size_mb = downloaded_size / (1024 * 1024)
+                return {
+                    'success': True,
+                    'file_path': str(local_path),
+                    'size_mb': size_mb,
+                    'type': file_type
+                }
+                
+            except Exception as e:
+                return {
+                    'success': False,
+                    'error': str(e),
+                    'type': task.get('type', 'unknown')
+                }
+        
+        # Execute downloads concurrently (max 3 threads for PDF/JP2/OCR)
+        results = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            future_to_task = {executor.submit(download_single_file, task): task for task in download_tasks}
+            
+            for future in concurrent.futures.as_completed(future_to_task):
+                result = future.result()
+                results.append(result)
+                
+                # Log any failures
+                if not result['success']:
+                    task = future_to_task[future]
+                    self.logger.warning(f"Failed to download {task['type']} file: {result['error']}")
+        
+        return results
 
     def _download_file(self, url: str, local_path: Path) -> Dict:
         """Download a single file from URL to local path."""
