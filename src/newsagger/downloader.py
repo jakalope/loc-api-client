@@ -192,10 +192,24 @@ class DownloadProcessor:
             max_idle_minutes: Stop after this many minutes without new items
         """
         import time
+        import signal
         from datetime import datetime, timedelta
+        
+        # Set up signal handling for graceful shutdown
+        shutdown_requested = False
+        
+        def signal_handler(signum, frame):
+            nonlocal shutdown_requested
+            shutdown_requested = True
+            self.logger.info("Shutdown signal received, finishing current batch...")
+        
+        # Register signal handlers
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
         
         self.logger.info("Starting continuous download queue processing...")
         self.logger.info(f"Will stop after {max_idle_minutes} minutes without new items")
+        self.logger.info("Press Ctrl+C to stop gracefully")
         
         # Global tracking across all batches
         global_stats = {
@@ -213,7 +227,7 @@ class DownloadProcessor:
         
         self.logger.info(f"Batch size: {batch_size}, Poll interval: {poll_interval}s")
         
-        while True:
+        while not shutdown_requested:
             # Check if we should stop due to inactivity
             time_since_activity = datetime.now() - last_activity_time
             if time_since_activity > timedelta(minutes=max_idle_minutes):
@@ -225,7 +239,8 @@ class DownloadProcessor:
             
             if not queue_items:
                 self.logger.debug(f"No items in queue, waiting {poll_interval}s...")
-                time.sleep(poll_interval)
+                # Use interruptible sleep
+                self._interruptible_sleep(poll_interval, lambda: shutdown_requested)
                 continue
             
             # Process a batch of items
@@ -268,12 +283,17 @@ class DownloadProcessor:
                     self.storage.update_queue_item(item['id'], status='completed')
                 
                 last_activity_time = datetime.now()
-                time.sleep(poll_interval)
+                self._interruptible_sleep(poll_interval, lambda: shutdown_requested)
                 continue
+            
+            # Check for shutdown before processing
+            if shutdown_requested:
+                self.logger.info("Shutdown requested, stopping before processing batch")
+                break
             
             # Process the batch using existing single-batch logic
             try:
-                batch_stats = self._process_batch_items(batch_items)
+                batch_stats = self._process_batch_items(batch_items, lambda: shutdown_requested)
                 
                 # Update global stats
                 global_stats["downloaded"] += batch_stats.get("downloaded", 0)
@@ -293,10 +313,11 @@ class DownloadProcessor:
             except Exception as e:
                 self.logger.error(f"Error processing batch: {e}")
                 global_stats["errors"] += len(batch_items)
-                time.sleep(poll_interval)
+                self._interruptible_sleep(poll_interval, lambda: shutdown_requested)
             
-            # Brief pause between batches to avoid overwhelming the system
-            time.sleep(5)
+            # Brief pause between batches to avoid overwhelming the system (but check for shutdown)
+            if not shutdown_requested:
+                self._interruptible_sleep(5, lambda: shutdown_requested)
         
         # Final statistics
         global_stats["end_time"] = datetime.now()
@@ -306,9 +327,30 @@ class DownloadProcessor:
                         f"{global_stats['errors']} errors, {global_stats['total_size_mb']:.1f} MB total "
                         f"across {global_stats['batches_processed']} batches")
         
+        # Log final shutdown reason
+        if shutdown_requested:
+            self.logger.info("Processing stopped due to shutdown signal")
+        
         return global_stats
     
-    def _process_batch_items(self, queue_items: List[Dict]) -> Dict:
+    def _interruptible_sleep(self, total_seconds: float, should_stop_func=None):
+        """Sleep that can be interrupted by checking a condition."""
+        if total_seconds <= 0:
+            return
+            
+        # Sleep in small increments to allow interruption
+        check_interval = min(1.0, total_seconds / 10)  # Check every second or 10% of sleep time
+        remaining = total_seconds
+        
+        while remaining > 0:
+            if should_stop_func and should_stop_func():
+                break
+            
+            sleep_time = min(check_interval, remaining)
+            time.sleep(sleep_time)
+            remaining -= sleep_time
+    
+    def _process_batch_items(self, queue_items: List[Dict], should_stop_func=None) -> Dict:
         """Process a batch of queue items using the existing logic."""
         # Re-use the existing processing logic but without the initial queue fetch
         total_size_mb = 0
@@ -320,6 +362,11 @@ class DownloadProcessor:
         
         with ProgressTracker(total=len(queue_items), desc=f"Downloading batch", unit="files") as progress:
             for i, item in enumerate(queue_items):
+                # Check for shutdown before processing each item
+                if should_stop_func and should_stop_func():
+                    self.logger.info(f"Shutdown requested, stopping after {i}/{len(queue_items)} items")
+                    break
+                
                 # Mark as in-progress
                 self.storage.update_queue_item(item['id'], status='in_progress')
                 

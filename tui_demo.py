@@ -77,10 +77,21 @@ def run_tui_demo():
     console.print("[yellow]This demo shows the TUI with simulated data (no real processes)[/yellow]")
     console.print()
     
+    # Set up signal handling for graceful exit
+    import signal
+    shutdown_requested = False
+    
+    def signal_handler(signum, frame):
+        nonlocal shutdown_requested
+        shutdown_requested = True
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     try:
         with Live(console=console, refresh_per_second=2, screen=True) as live:
             iteration = 0
-            while True:
+            while not shutdown_requested:
                 # Create dynamic demo data
                 stats = create_demo_data()
                 processes = create_demo_processes()
@@ -101,11 +112,13 @@ def run_tui_demo():
                 iteration += 1
                 
     except KeyboardInterrupt:
-        console.print("\n[green]✅ Demo completed![/green]")
+        pass  # Already handled by signal handler
     except Exception as e:
         console.print(f"\n[red]❌ Error: {e}[/red]")
         import traceback
         traceback.print_exc()
+    finally:
+        console.print("\n[green]✅ Demo completed![/green]")
 
 if __name__ == '__main__':
     run_tui_demo()
