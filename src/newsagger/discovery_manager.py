@@ -1243,23 +1243,34 @@ class DiscoveryManager:
                                         'discovered': batch_discovered
                                     })
                                     
+                                    # Collect pages for batch storage
+                                    batch_pages = []
                                     for page_data in issue_pages:
                                         # Process page from issue data without individual API calls (much faster!)
                                         page = self.processor.process_page_from_issue(page_data, issue_details)
                                         if page:
-                                            discovered_pages += 1
-                                            batch_discovered += 1
-                                            
-                                            # Auto-enqueue if requested
-                                            if auto_enqueue:
-                                                queue_result = self.storage.add_to_download_queue(
-                                                    queue_type='page',
-                                                    reference_id=page.item_id,
-                                                    priority=2  # Medium priority for batch-discovered content
-                                                )
-                                                if queue_result:
-                                                    enqueued_pages += 1
-                                                    batch_enqueued += 1
+                                            batch_pages.append(page)
+                                    
+                                    # Store pages in database (critical for resume functionality)
+                                    if batch_pages:
+                                        stored_count = self.storage.store_pages(batch_pages)
+                                        discovered_pages += stored_count
+                                        batch_discovered += stored_count
+                                        
+                                        # Auto-enqueue if requested
+                                        if auto_enqueue:
+                                            for page in batch_pages:
+                                                # Check if already queued to avoid duplicates
+                                                existing_item = self.storage.get_queue_item_by_reference(page.item_id)
+                                                if not existing_item:
+                                                    queue_result = self.storage.add_to_download_queue(
+                                                        queue_type='page',
+                                                        reference_id=page.item_id,
+                                                        priority=2  # Medium priority for batch-discovered content
+                                                    )
+                                                    if queue_result:
+                                                        enqueued_pages += 1
+                                                        batch_enqueued += 1
                                 except Exception as e:
                                     self.logger.error(f"Error processing issue {issue_url}: {e}")
                                     continue

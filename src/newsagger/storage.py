@@ -804,6 +804,18 @@ class NewsStorage(DatabaseOperationMixin):
             """, params)
             conn.commit()
     
+    def get_queue_item_by_reference(self, reference_id: str) -> Optional[Dict]:
+        """Check if an item is already in the download queue."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM download_queue 
+                WHERE reference_id = ? 
+                LIMIT 1
+            """, (reference_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    
     # ===== ENHANCED STATISTICS METHODS =====
     
     def get_discovery_stats(self) -> Dict:
