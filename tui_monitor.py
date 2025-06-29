@@ -394,26 +394,26 @@ class TUIMonitor:
             ("DB: ", "dim"),
             (Path(self.db_path).name, "yellow")
         )
-        layout["header"] = Panel(Align.center(header_text), style="bold")
+        layout["header"].update(Panel(Align.center(header_text), style="bold"))
         
         # Discovery Panel
-        layout["discovery"] = self._create_discovery_panel(stats)
+        layout["discovery"].update(self._create_discovery_panel(stats))
         
         # Downloads Panel  
-        layout["downloads"] = self._create_downloads_panel(stats)
+        layout["downloads"].update(self._create_downloads_panel(stats))
         
         # Process Status Panel
-        layout["processes"] = self._create_process_panel(processes)
+        layout["processes"].update(self._create_process_panel(processes))
         
         # Statistics Panel
-        layout["stats"] = self._create_stats_panel(stats)
+        layout["stats"].update(self._create_stats_panel(stats))
         
         # Estimates Panel
-        layout["estimates"] = self._create_estimates_panel(stats)
+        layout["estimates"].update(self._create_estimates_panel(stats))
         
         # Footer
         footer_text = "Press Ctrl+C to stop all processes and exit"
-        layout["footer"] = Panel(Align.center(footer_text), style="dim")
+        layout["footer"].update(Panel(Align.center(footer_text), style="dim"))
         
         return layout
     
