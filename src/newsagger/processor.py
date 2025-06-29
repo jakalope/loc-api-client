@@ -367,6 +367,71 @@ class NewsDataProcessor:
             self.logger.error(f"Failed to process page from issue: {e}")
             return None
     
+    def estimate_pages_from_batch_issue(self, issue_data: Dict, typical_pages_per_issue: int = 8) -> List[PageInfo]:
+        """
+        Estimate pages for an issue from batch data without fetching issue details.
+        This is much faster but less accurate than fetching actual issue details.
+        """
+        try:
+            issue_url = issue_data.get('url', '')
+            date = issue_data.get('date_issued', '')
+            title_info = issue_data.get('title', {})
+            title = title_info.get('name', 'Unknown Title')
+            
+            # Extract LCCN from title URL or issue URL
+            lccn = ''
+            title_url = title_info.get('url', '')
+            if title_url and '/lccn/' in title_url:
+                parts = title_url.split('/lccn/')
+                if len(parts) > 1:
+                    lccn = parts[1].replace('.json', '')
+            elif issue_url and '/lccn/' in issue_url:
+                parts = issue_url.split('/lccn/')
+                if len(parts) > 1:
+                    lccn = parts[1].split('/')[0]
+            
+            # Extract edition from issue URL
+            edition = 1
+            if issue_url:
+                parts = issue_url.strip('/').split('/')
+                for part in parts:
+                    if part.startswith('ed-'):
+                        try:
+                            edition = int(part.split('-')[1])
+                            break
+                        except (IndexError, ValueError):
+                            pass
+            
+            # Estimate pages (typically newspapers have 4-12 pages per issue)
+            estimated_pages = []
+            base_url = issue_url.replace('.json', '') if issue_url else ''
+            
+            for seq in range(1, typical_pages_per_issue + 1):
+                # Construct page URL from issue URL
+                page_url = f"{base_url}/seq-{seq}"
+                item_id = page_url.replace('https://chroniclingamerica.loc.gov/', '') if page_url.startswith('https://') else page_url
+                
+                page_info = PageInfo(
+                    item_id=item_id,
+                    lccn=lccn,
+                    title=title,
+                    date=date,
+                    edition=edition,
+                    sequence=seq,
+                    page_url=page_url,
+                    pdf_url=f"{page_url}.pdf",
+                    jp2_url=f"{page_url}.jp2",
+                    ocr_text=f"{page_url}/ocr.txt",
+                    word_count=None
+                )
+                estimated_pages.append(page_info)
+            
+            return estimated_pages
+            
+        except Exception as e:
+            self.logger.error(f"Failed to estimate pages from batch issue: {e}")
+            return []
+    
     def filter_newspapers_by_criteria(self, newspapers: List[NewspaperInfo], 
                                     state: Optional[str] = None,
                                     language: Optional[str] = None,
