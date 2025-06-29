@@ -26,7 +26,7 @@ from newsagger.storage import NewsStorage
 from newsagger.batch_utils import BatchMapper, BatchSessionTracker
 from newsagger.rate_limited_client import LocApiClient
 
-from rich.console import Console
+from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
 from rich.progress import (
@@ -447,8 +447,7 @@ class TUIMonitor:
                 completed=stats.current_batch_progress
             )
         
-        content = []
-        content.append(batch_progress)
+        content = [batch_progress]
         if stats.current_batch:
             content.append(current_batch_progress)
         
@@ -473,7 +472,7 @@ class TUIMonitor:
             content.append(Text(rate_text, style="dim"))
         
         return Panel(
-            "\n".join(str(item) for item in content),
+            Group(*content),
             title="🔍 Batch Discovery",
             border_style="cyan"
         )
@@ -508,7 +507,7 @@ class TUIMonitor:
             content.append(Text(rate_text, style="dim"))
         
         return Panel(
-            "\n".join(str(item) for item in content),
+            Group(*content),
             title="⬇️ Downloads",
             border_style="green"
         )
