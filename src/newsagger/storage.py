@@ -816,6 +816,70 @@ class NewsStorage(DatabaseOperationMixin):
             row = cursor.fetchone()
             return dict(row) if row else None
     
+    def store_pages_and_enqueue(self, pages: List, priority: int = 5) -> Tuple[int, int]:
+        """
+        Atomically store pages and add them to download queue in a single transaction.
+        Returns (pages_stored, pages_enqueued).
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            stored_count = 0
+            enqueued_count = 0
+            
+            try:
+                # Store pages first
+                for page in pages:
+                    try:
+                        conn.execute("""
+                            INSERT OR REPLACE INTO pages 
+                            (item_id, lccn, title, date, edition, sequence, 
+                             page_url, pdf_url, jp2_url, ocr_text, word_count)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, (
+                            page.item_id,
+                            page.lccn,
+                            page.title,
+                            page.date,
+                            page.edition,
+                            page.sequence,
+                            page.page_url,
+                            page.pdf_url,
+                            page.jp2_url,
+                            page.ocr_text,
+                            page.word_count
+                        ))
+                        stored_count += 1
+                    except sqlite3.Error as e:
+                        self.logger.warning(f"Failed to store page {page.item_id}: {e}")
+                        continue
+                
+                # Then enqueue pages (only if they were successfully stored)
+                for page in pages[:stored_count]:
+                    try:
+                        # Check if already queued to avoid duplicates
+                        cursor = conn.execute("""
+                            SELECT 1 FROM download_queue WHERE reference_id = ? LIMIT 1
+                        """, (page.item_id,))
+                        
+                        if not cursor.fetchone():
+                            conn.execute("""
+                                INSERT INTO download_queue 
+                                (queue_type, reference_id, priority, estimated_size_mb, estimated_time_hours)
+                                VALUES (?, ?, ?, ?, ?)
+                            """, ('page', page.item_id, priority, 0, 0))
+                            enqueued_count += 1
+                    except sqlite3.Error as e:
+                        self.logger.warning(f"Failed to enqueue page {page.item_id}: {e}")
+                        continue
+                
+                # Commit the entire transaction atomically
+                conn.commit()
+                return stored_count, enqueued_count
+                
+            except Exception as e:
+                conn.rollback()
+                self.logger.error(f"Failed to store and enqueue pages atomically: {e}")
+                return 0, 0
+    
     # ===== ENHANCED STATISTICS METHODS =====
     
     def get_discovery_stats(self) -> Dict:

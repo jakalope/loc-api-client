@@ -1251,26 +1251,23 @@ class DiscoveryManager:
                                         if page:
                                             batch_pages.append(page)
                                     
-                                    # Store pages in database (critical for resume functionality)
+                                    # Store pages in database and enqueue atomically (critical for resume functionality)
                                     if batch_pages:
-                                        stored_count = self.storage.store_pages(batch_pages)
-                                        discovered_pages += stored_count
-                                        batch_discovered += stored_count
-                                        
-                                        # Auto-enqueue if requested
                                         if auto_enqueue:
-                                            for page in batch_pages:
-                                                # Check if already queued to avoid duplicates
-                                                existing_item = self.storage.get_queue_item_by_reference(page.item_id)
-                                                if not existing_item:
-                                                    queue_result = self.storage.add_to_download_queue(
-                                                        queue_type='page',
-                                                        reference_id=page.item_id,
-                                                        priority=2  # Medium priority for batch-discovered content
-                                                    )
-                                                    if queue_result:
-                                                        enqueued_pages += 1
-                                                        batch_enqueued += 1
+                                            # Store pages and enqueue in a single atomic operation
+                                            stored_count, enqueued_count = self.storage.store_pages_and_enqueue(
+                                                batch_pages, 
+                                                priority=2  # Medium priority for batch-discovered content
+                                            )
+                                            discovered_pages += stored_count
+                                            batch_discovered += stored_count
+                                            enqueued_pages += enqueued_count
+                                            batch_enqueued += enqueued_count
+                                        else:
+                                            # Just store pages without enqueueing
+                                            stored_count = self.storage.store_pages(batch_pages)
+                                            discovered_pages += stored_count
+                                            batch_discovered += stored_count
                                 except Exception as e:
                                     self.logger.error(f"Error processing issue {issue_url}: {e}")
                                     continue
