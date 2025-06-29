@@ -826,6 +826,9 @@ class NewsStorage(DatabaseOperationMixin):
             enqueued_count = 0
             
             try:
+                # Track successfully stored pages
+                successfully_stored_pages = []
+                
                 # Store pages first
                 for page in pages:
                     try:
@@ -847,13 +850,14 @@ class NewsStorage(DatabaseOperationMixin):
                             page.ocr_text,
                             page.word_count
                         ))
+                        successfully_stored_pages.append(page)
                         stored_count += 1
                     except sqlite3.Error as e:
                         self.logger.warning(f"Failed to store page {page.item_id}: {e}")
                         continue
                 
-                # Then enqueue pages (only if they were successfully stored)
-                for page in pages[:stored_count]:
+                # Then enqueue only the pages that were successfully stored
+                for page in successfully_stored_pages:
                     try:
                         # Check if already queued to avoid duplicates
                         cursor = conn.execute("""
