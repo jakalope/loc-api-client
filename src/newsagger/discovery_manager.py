@@ -1244,42 +1244,22 @@ class DiscoveryManager:
                                     })
                                     
                                     for page_data in issue_pages:
-                                        # Each page_data has 'url' and 'sequence' - we need full page details
-                                        page_url = page_data.get('url', '')
-                                        if page_url:
-                                            try:
-                                                # Convert page URL to endpoint
-                                                if page_url.startswith('https://chroniclingamerica.loc.gov/'):
-                                                    page_endpoint = page_url.replace('https://chroniclingamerica.loc.gov/', '')
-                                                else:
-                                                    page_endpoint = page_url
-                                                
-                                                # Get full page details (add brief delay for rate limiting)
-                                                page_details = self.api_client._make_request(page_endpoint)
-                                                
-                                                # Small delay between page requests to be respectful
-                                                import time
-                                                time.sleep(0.1)  # 100ms delay between individual pages
-                                                
-                                                # Convert page details to our page format
-                                                page = self.processor.process_page_details(page_details, page_url)
-                                                if page:
-                                                    discovered_pages += 1
-                                                    batch_discovered += 1
-                                                    
-                                                    # Auto-enqueue if requested
-                                                    if auto_enqueue:
-                                                        queue_result = self.storage.add_to_download_queue(
-                                                            queue_type='page',
-                                                            reference_id=page.item_id,
-                                                            priority=2  # Medium priority for batch-discovered content
-                                                        )
-                                                        if queue_result:
-                                                            enqueued_pages += 1
-                                                            batch_enqueued += 1
-                                            except Exception as e:
-                                                self.logger.error(f"Error processing page {page_url}: {e}")
-                                                continue
+                                        # Process page from issue data without individual API calls (much faster!)
+                                        page = self.processor.process_page_from_issue(page_data, issue_details)
+                                        if page:
+                                            discovered_pages += 1
+                                            batch_discovered += 1
+                                            
+                                            # Auto-enqueue if requested
+                                            if auto_enqueue:
+                                                queue_result = self.storage.add_to_download_queue(
+                                                    queue_type='page',
+                                                    reference_id=page.item_id,
+                                                    priority=2  # Medium priority for batch-discovered content
+                                                )
+                                                if queue_result:
+                                                    enqueued_pages += 1
+                                                    batch_enqueued += 1
                                 except Exception as e:
                                     self.logger.error(f"Error processing issue {issue_url}: {e}")
                                     continue

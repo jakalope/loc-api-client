@@ -301,6 +301,72 @@ class NewsDataProcessor:
             self.logger.error(f"Failed to process page details: {e}")
             return None
     
+    def process_page_from_issue(self, page_data: Dict, issue_details: Dict) -> Optional[PageInfo]:
+        """Process page data from issue without fetching individual page details (much faster)."""
+        try:
+            page_url = page_data.get('url', '')
+            sequence = page_data.get('sequence', 1)
+            
+            if not page_url:
+                return None
+            
+            # Extract information from issue details (avoid extra API call)
+            title_info = issue_details.get('title', {})
+            title = title_info.get('name', 'Unknown Title')
+            date = issue_details.get('date_issued', '')
+            
+            # Extract LCCN from issue URL or title
+            lccn = ''
+            issue_url = issue_details.get('url', '')
+            if issue_url and '/lccn/' in issue_url:
+                parts = issue_url.split('/lccn/')
+                if len(parts) > 1:
+                    lccn = parts[1].split('/')[0]
+            
+            # Extract edition from page URL
+            edition = 1
+            if page_url:
+                parts = page_url.strip('/').split('/')
+                for part in parts:
+                    if part.startswith('ed-'):
+                        try:
+                            edition = int(part.split('-')[1])
+                            break
+                        except (IndexError, ValueError):
+                            pass
+            
+            # Create item_id from page URL
+            item_id = ''
+            if page_url:
+                if page_url.startswith('https://chroniclingamerica.loc.gov/'):
+                    item_id = page_url.replace('https://chroniclingamerica.loc.gov/', '').replace('.json', '')
+                else:
+                    item_id = page_url.replace('.json', '')
+            
+            # Construct URLs from the base page URL (without fetching page details)
+            base_url = page_url.replace('.json', '')
+            
+            # Create PageInfo object with constructed URLs
+            page_info = PageInfo(
+                item_id=item_id,
+                lccn=lccn,
+                title=title,
+                date=date,
+                edition=edition,
+                sequence=sequence,
+                page_url=base_url,
+                pdf_url=f"{base_url}.pdf",
+                jp2_url=f"{base_url}.jp2", 
+                ocr_text=f"{base_url}/ocr.txt",
+                word_count=None  # Not available without fetching page details
+            )
+            
+            return page_info
+            
+        except Exception as e:
+            self.logger.error(f"Failed to process page from issue: {e}")
+            return None
+    
     def filter_newspapers_by_criteria(self, newspapers: List[NewspaperInfo], 
                                     state: Optional[str] = None,
                                     language: Optional[str] = None,
