@@ -198,6 +198,26 @@ class NewsStorage(DatabaseOperationMixin):
                 CREATE INDEX IF NOT EXISTS idx_issues_date ON periodical_issues(issue_date);
                 CREATE INDEX IF NOT EXISTS idx_queue_status ON download_queue(status);
                 CREATE INDEX IF NOT EXISTS idx_queue_priority ON download_queue(priority);
+                
+                -- Table to track batch discovery sessions for resume functionality
+                CREATE TABLE IF NOT EXISTS batch_discovery_sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_name TEXT NOT NULL UNIQUE,
+                    total_batches INTEGER DEFAULT 0,
+                    current_batch_index INTEGER DEFAULT 0,
+                    current_batch_name TEXT,
+                    current_issue_index INTEGER DEFAULT 0,
+                    total_issues_in_batch INTEGER DEFAULT 0,
+                    total_pages_discovered INTEGER DEFAULT 0,
+                    total_pages_enqueued INTEGER DEFAULT 0,
+                    auto_enqueue BOOLEAN DEFAULT FALSE,
+                    status TEXT DEFAULT 'active', -- 'active', 'paused', 'completed', 'failed'
+                    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP
+                );
+                
+                CREATE INDEX IF NOT EXISTS idx_batch_sessions_status ON batch_discovery_sessions(status);
             """)
     
     def store_newspapers(self, newspapers: List[NewspaperInfo]) -> int:
@@ -883,6 +903,89 @@ class NewsStorage(DatabaseOperationMixin):
                 conn.rollback()
                 self.logger.error(f"Failed to store and enqueue pages atomically: {e}")
                 return 0, 0
+    
+    # ===== BATCH DISCOVERY SESSION METHODS =====
+    
+    def create_batch_discovery_session(self, session_name: str, total_batches: int, 
+                                     auto_enqueue: bool = False) -> int:
+        """Create a new batch discovery session for tracking progress."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                INSERT OR REPLACE INTO batch_discovery_sessions 
+                (session_name, total_batches, auto_enqueue, status)
+                VALUES (?, ?, ?, 'active')
+            """, (session_name, total_batches, auto_enqueue))
+            conn.commit()
+            return cursor.lastrowid
+    
+    def get_batch_discovery_session(self, session_name: str) -> Optional[Dict]:
+        """Get existing batch discovery session for resume."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("""
+                SELECT * FROM batch_discovery_sessions 
+                WHERE session_name = ? AND status = 'active'
+                ORDER BY started_at DESC
+                LIMIT 1
+            """, (session_name,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    
+    def update_batch_discovery_session(self, session_name: str, 
+                                     current_batch_index: int = None,
+                                     current_batch_name: str = None,
+                                     current_issue_index: int = None,
+                                     total_issues_in_batch: int = None,
+                                     pages_discovered_delta: int = 0,
+                                     pages_enqueued_delta: int = 0,
+                                     status: str = None):
+        """Update batch discovery session progress."""
+        with sqlite3.connect(self.db_path) as conn:
+            updates = ["updated_at = CURRENT_TIMESTAMP"]
+            params = []
+            
+            if current_batch_index is not None:
+                updates.append("current_batch_index = ?")
+                params.append(current_batch_index)
+                
+            if current_batch_name is not None:
+                updates.append("current_batch_name = ?")
+                params.append(current_batch_name)
+                
+            if current_issue_index is not None:
+                updates.append("current_issue_index = ?")
+                params.append(current_issue_index)
+                
+            if total_issues_in_batch is not None:
+                updates.append("total_issues_in_batch = ?")
+                params.append(total_issues_in_batch)
+                
+            if pages_discovered_delta != 0:
+                updates.append("total_pages_discovered = total_pages_discovered + ?")
+                params.append(pages_discovered_delta)
+                
+            if pages_enqueued_delta != 0:
+                updates.append("total_pages_enqueued = total_pages_enqueued + ?")
+                params.append(pages_enqueued_delta)
+                
+            if status:
+                updates.append("status = ?")
+                params.append(status)
+                if status == 'completed':
+                    updates.append("completed_at = CURRENT_TIMESTAMP")
+            
+            params.append(session_name)
+            
+            conn.execute(f"""
+                UPDATE batch_discovery_sessions 
+                SET {', '.join(updates)}
+                WHERE session_name = ?
+            """, params)
+            conn.commit()
+    
+    def complete_batch_discovery_session(self, session_name: str):
+        """Mark batch discovery session as completed."""
+        self.update_batch_discovery_session(session_name, status='completed')
     
     # ===== ENHANCED STATISTICS METHODS =====
     
