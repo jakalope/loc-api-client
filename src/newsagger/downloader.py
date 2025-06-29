@@ -589,7 +589,7 @@ class DownloadProcessor:
             
         try:
             # Use a single transaction for all updates
-            with self.storage._get_db_connection() as conn:
+            with self.storage._get_connection() as conn:
                 cursor = conn.cursor()
                 for update in updates:
                     cursor.execute(
