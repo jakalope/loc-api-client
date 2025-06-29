@@ -197,19 +197,28 @@ class DownloadProcessor:
         
         # Set up signal handling for graceful shutdown
         shutdown_requested = False
+        force_quit = False
         
-        def signal_handler(signum, frame):
+        def graceful_signal_handler(signum, frame):
             nonlocal shutdown_requested
             shutdown_requested = True
             self.logger.info("Shutdown signal received, finishing current batch...")
         
+        def force_quit_handler(signum, frame):
+            nonlocal force_quit
+            force_quit = True
+            self.logger.info("Force quit signal received, stopping immediately...")
+            # Restore default handler for immediate exit on second SIGQUIT
+            signal.signal(signal.SIGQUIT, signal.SIG_DFL)
+        
         # Register signal handlers
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, graceful_signal_handler)   # Ctrl+C - graceful
+        signal.signal(signal.SIGTERM, graceful_signal_handler)  # Terminate - graceful  
+        signal.signal(signal.SIGQUIT, force_quit_handler)       # Ctrl+\ - immediate
         
         self.logger.info("Starting continuous download queue processing...")
         self.logger.info(f"Will stop after {max_idle_minutes} minutes without new items")
-        self.logger.info("Press Ctrl+C to stop gracefully")
+        self.logger.info("Press Ctrl+C to stop gracefully, Ctrl+\\ to force quit immediately")
         
         # Global tracking across all batches
         global_stats = {
@@ -227,7 +236,7 @@ class DownloadProcessor:
         
         self.logger.info(f"Batch size: {batch_size}, Poll interval: {poll_interval}s")
         
-        while not shutdown_requested:
+        while not shutdown_requested and not force_quit:
             # Check if we should stop due to inactivity
             time_since_activity = datetime.now() - last_activity_time
             if time_since_activity > timedelta(minutes=max_idle_minutes):
@@ -240,7 +249,7 @@ class DownloadProcessor:
             if not queue_items:
                 self.logger.debug(f"No items in queue, waiting {poll_interval}s...")
                 # Use interruptible sleep
-                self._interruptible_sleep(poll_interval, lambda: shutdown_requested)
+                self._interruptible_sleep(poll_interval, lambda: shutdown_requested or force_quit)
                 continue
             
             # Process a batch of items
@@ -287,13 +296,14 @@ class DownloadProcessor:
                 continue
             
             # Check for shutdown before processing
-            if shutdown_requested:
-                self.logger.info("Shutdown requested, stopping before processing batch")
+            if shutdown_requested or force_quit:
+                reason = "Force quit" if force_quit else "Shutdown"
+                self.logger.info(f"{reason} requested, stopping before processing batch")
                 break
             
             # Process the batch using existing single-batch logic
             try:
-                batch_stats = self._process_batch_items(batch_items, lambda: shutdown_requested)
+                batch_stats = self._process_batch_items(batch_items, lambda: shutdown_requested or force_quit)
                 
                 # Update global stats
                 global_stats["downloaded"] += batch_stats.get("downloaded", 0)
@@ -313,11 +323,11 @@ class DownloadProcessor:
             except Exception as e:
                 self.logger.error(f"Error processing batch: {e}")
                 global_stats["errors"] += len(batch_items)
-                self._interruptible_sleep(poll_interval, lambda: shutdown_requested)
+                self._interruptible_sleep(poll_interval, lambda: shutdown_requested or force_quit)
             
             # Brief pause between batches to avoid overwhelming the system (but check for shutdown)
-            if not shutdown_requested:
-                self._interruptible_sleep(5, lambda: shutdown_requested)
+            if not shutdown_requested and not force_quit:
+                self._interruptible_sleep(5, lambda: shutdown_requested or force_quit)
         
         # Final statistics
         global_stats["end_time"] = datetime.now()
@@ -328,7 +338,9 @@ class DownloadProcessor:
                         f"across {global_stats['batches_processed']} batches")
         
         # Log final shutdown reason
-        if shutdown_requested:
+        if force_quit:
+            self.logger.info("Processing force quit via SIGQUIT")
+        elif shutdown_requested:
             self.logger.info("Processing stopped due to shutdown signal")
         
         return global_stats
