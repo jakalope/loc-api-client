@@ -265,7 +265,7 @@ class DownloadProcessor:
                 
                 # Mark items as processed in dry run
                 for item in batch_items:
-                    self.storage.update_download_queue_status(item['id'], 'completed')
+                    self.storage.update_queue_item(item['id'], status='completed')
                 
                 last_activity_time = datetime.now()
                 time.sleep(poll_interval)
@@ -321,7 +321,7 @@ class DownloadProcessor:
         with ProgressTracker(total=len(queue_items), desc=f"Downloading batch", unit="files") as progress:
             for i, item in enumerate(queue_items):
                 # Mark as in-progress
-                self.storage.update_download_queue_status(item['id'], 'in_progress')
+                self.storage.update_queue_item(item['id'], status='in_progress')
                 
                 try:
                     # Process the item
@@ -335,9 +335,7 @@ class DownloadProcessor:
                         batch_updates.append({
                             'id': item['id'],
                             'status': 'completed',
-                            'downloaded_at': datetime.now().isoformat(),
-                            'file_path': result.get('file_path'),
-                            'actual_size_mb': result.get('size_mb', 0)
+                            'progress_percent': 100
                         })
                         
                     else:
@@ -347,8 +345,7 @@ class DownloadProcessor:
                         batch_updates.append({
                             'id': item['id'],
                             'status': 'failed',
-                            'error_message': result.get('error'),
-                            'failed_at': datetime.now().isoformat()
+                            'error_message': result.get('error')
                         })
                 
                 except Exception as e:
@@ -358,8 +355,7 @@ class DownloadProcessor:
                     batch_updates.append({
                         'id': item['id'],
                         'status': 'failed',
-                        'error_message': str(e),
-                        'failed_at': datetime.now().isoformat()
+                        'error_message': str(e)
                     })
                 
                 # Process database updates in batches
