@@ -152,6 +152,11 @@ python3 main.py --help
 4. **Progress Tracking**: Update database status for all operations
 5. **Error Handling**: Implement graceful timeout and retry logic
 6. **Testing**: Maintain comprehensive test coverage
+7. **Data Accuracy**: NEVER substitute anecdotal information for actual data
+   - Always display what the database/filesystem actually reports
+   - If data seems incorrect, report the actual value and let the user investigate
+   - Never use hardcoded "fallback" values based on user observations
+   - Zero or empty values are better than fake data
 
 ### **Key Implementation Patterns:**
 

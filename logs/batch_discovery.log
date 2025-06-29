@@ -1,0 +1,90 @@
+2025-06-29 12:31:51,483 - newsagger.rate_limited_client - INFO - Initialized rate-limited client: max 12 req/min
+🔍 Starting batch-based content discovery...
+   📦 Max batches: unlimited
+   ⬇️ Auto-enqueue: Yes
+   ⏱️ Rate limit delay: 3.0s
+2025-06-29 12:31:51,484 - newsagger.batch_discovery - INFO - Starting batch-based content discovery...
+2025-06-29 12:31:51,484 - newsagger.batch_discovery - INFO - Getting list of available batches...
+2025-06-29 12:31:53,082 - newsagger.batch_discovery - INFO - Will process 25 of 25 available batches
+2025-06-29 12:31:53,083 - newsagger.batch_discovery - INFO - Resuming from batch 5, issue 837
+2025-06-29 12:31:53,083 - newsagger.batch_discovery - INFO - Previous progress: 47826 discovered, 47826 enqueued
+Processing batches:  20%|██        | 5/25 [00:00<?, ?batch/s]Processing az_chrysocolla_ver01...:  20%|██        | 5/25 [00:00<?, ?batch/s]Processing az_chrysocolla_ver01...:  20%|██        | 5/25 [00:00<?, ?batch/s, pages=10,161, found=0]
+Issues in az_chrysocolla_:  69%|██████▉   | 837/1213 [00:00<?, ?issue/s][A
+Issues in az_chrysocolla_:  69%|██████▉   | 837/1213 [00:05<?, ?issue/s, pages=8, discovered=8][A
+Issues in az_chrysocolla_:  69%|██████▉   | 838/1213 [00:05<34:54,  5.59s/issue, pages=8, discovered=8][A
+Issues in az_chrysocolla_:  69%|██████▉   | 838/1213 [00:10<34:54,  5.59s/issue, pages=8, discovered=16][A
+Issues in az_chrysocolla_:  69%|██████▉   | 839/1213 [00:10<33:16,  5.34s/issue, pages=8, discovered=16][A
+Issues in az_chrysocolla_:  69%|██████▉   | 839/1213 [00:16<33:16,  5.34s/issue, pages=8, discovered=24][A
+Issues in az_chrysocolla_:  69%|██████▉   | 840/1213 [00:16<33:40,  5.42s/issue, pages=8, discovered=24][A
+Issues in az_chrysocolla_:  69%|██████▉   | 840/1213 [00:21<33:40,  5.42s/issue, pages=8, discovered=32][A
+Issues in az_chrysocolla_:  69%|██████▉   | 841/1213 [00:21<34:19,  5.54s/issue, pages=8, discovered=32][A
+Issues in az_chrysocolla_:  69%|██████▉   | 841/1213 [00:26<34:19,  5.54s/issue, pages=8, discovered=40][A
+Issues in az_chrysocolla_:  69%|██████▉   | 842/1213 [00:26<31:40,  5.12s/issue, pages=8, discovered=40][A
+Issues in az_chrysocolla_:  69%|██████▉   | 842/1213 [00:32<31:40,  5.12s/issue, pages=8, discovered=48][A
+Issues in az_chrysocolla_:  69%|██████▉   | 843/1213 [00:32<32:49,  5.32s/issue, pages=8, discovered=48][A
+Issues in az_chrysocolla_:  69%|██████▉   | 843/1213 [00:36<32:49,  5.32s/issue, pages=8, discovered=56][A
+Issues in az_chrysocolla_:  70%|██████▉   | 844/1213 [00:36<30:45,  5.00s/issue, pages=8, discovered=56][A
+Issues in az_chrysocolla_:  70%|██████▉   | 844/1213 [00:40<30:45,  5.00s/issue, pages=8, discovered=64][A
+Issues in az_chrysocolla_:  70%|██████▉   | 845/1213 [00:40<29:21,  4.79s/issue, pages=8, discovered=64][A
+Issues in az_chrysocolla_:  70%|██████▉   | 845/1213 [00:45<29:21,  4.79s/issue, pages=8, discovered=72][A
+Issues in az_chrysocolla_:  70%|██████▉   | 846/1213 [00:45<29:56,  4.90s/issue, pages=8, discovered=72][A
+Issues in az_chrysocolla_:  70%|██████▉   | 846/1213 [00:50<29:56,  4.90s/issue, pages=8, discovered=80][A
+Issues in az_chrysocolla_:  70%|██████▉   | 847/1213 [00:50<29:59,  4.92s/issue, pages=8, discovered=80][A
+Issues in az_chrysocolla_:  70%|██████▉   | 847/1213 [00:55<29:59,  4.92s/issue, pages=8, discovered=88][A
+Issues in az_chrysocolla_:  70%|██████▉   | 848/1213 [00:55<29:44,  4.89s/issue, pages=8, discovered=88][A
+Issues in az_chrysocolla_:  70%|██████▉   | 848/1213 [01:00<29:44,  4.89s/issue, pages=8, discovered=96][A
+Issues in az_chrysocolla_:  70%|██████▉   | 849/1213 [01:00<29:57,  4.94s/issue, pages=8, discovered=96][A
+Issues in az_chrysocolla_:  70%|██████▉   | 849/1213 [01:05<29:57,  4.94s/issue, pages=8, discovered=104][A
+Issues in az_chrysocolla_:  70%|███████   | 850/1213 [01:05<29:50,  4.93s/issue, pages=8, discovered=104][A
+Issues in az_chrysocolla_:  70%|███████   | 850/1213 [01:11<29:50,  4.93s/issue, pages=8, discovered=112][A
+Issues in az_chrysocolla_:  70%|███████   | 851/1213 [01:11<31:33,  5.23s/issue, pages=8, discovered=112][A
+Issues in az_chrysocolla_:  70%|███████   | 851/1213 [01:16<31:33,  5.23s/issue, pages=8, discovered=120][A
+Issues in az_chrysocolla_:  70%|███████   | 852/1213 [01:16<31:14,  5.19s/issue, pages=8, discovered=120][A
+Issues in az_chrysocolla_:  70%|███████   | 852/1213 [01:22<31:14,  5.19s/issue, pages=8, discovered=128][A
+Issues in az_chrysocolla_:  70%|███████   | 853/1213 [01:22<32:35,  5.43s/issue, pages=8, discovered=128][A
+Issues in az_chrysocolla_:  70%|███████   | 853/1213 [01:27<32:35,  5.43s/issue, pages=8, discovered=136][A
+Issues in az_chrysocolla_:  70%|███████   | 854/1213 [01:27<31:53,  5.33s/issue, pages=8, discovered=136][A
+Issues in az_chrysocolla_:  70%|███████   | 854/1213 [01:32<31:53,  5.33s/issue, pages=8, discovered=144][A
+Issues in az_chrysocolla_:  70%|███████   | 855/1213 [01:32<30:33,  5.12s/issue, pages=8, discovered=144][A
+Issues in az_chrysocolla_:  70%|███████   | 855/1213 [01:37<30:33,  5.12s/issue, pages=8, discovered=152][A
+Issues in az_chrysocolla_:  71%|███████   | 856/1213 [01:37<30:59,  5.21s/issue, pages=8, discovered=152][A
+Issues in az_chrysocolla_:  71%|███████   | 856/1213 [01:42<30:59,  5.21s/issue, pages=8, discovered=160][A
+Issues in az_chrysocolla_:  71%|███████   | 857/1213 [01:42<30:19,  5.11s/issue, pages=8, discovered=160][A
+Issues in az_chrysocolla_:  71%|███████   | 857/1213 [01:48<30:19,  5.11s/issue, pages=8, discovered=168][A
+Issues in az_chrysocolla_:  71%|███████   | 858/1213 [01:48<30:39,  5.18s/issue, pages=8, discovered=168][A
+Issues in az_chrysocolla_:  71%|███████   | 858/1213 [01:53<30:39,  5.18s/issue, pages=8, discovered=176][A
+Issues in az_chrysocolla_:  71%|███████   | 859/1213 [01:53<30:38,  5.19s/issue, pages=8, discovered=176][A
+Issues in az_chrysocolla_:  71%|███████   | 859/1213 [01:58<30:38,  5.19s/issue, pages=8, discovered=184][A
+Issues in az_chrysocolla_:  71%|███████   | 860/1213 [01:58<30:59,  5.27s/issue, pages=8, discovered=184][A
+Issues in az_chrysocolla_:  71%|███████   | 860/1213 [02:03<30:59,  5.27s/issue, pages=8, discovered=192][A
+Issues in az_chrysocolla_:  71%|███████   | 861/1213 [02:03<30:50,  5.26s/issue, pages=8, discovered=192][A
+Issues in az_chrysocolla_:  71%|███████   | 861/1213 [02:09<30:50,  5.26s/issue, pages=8, discovered=200][A
+Issues in az_chrysocolla_:  71%|███████   | 862/1213 [02:09<31:03,  5.31s/issue, pages=8, discovered=200][A
+Issues in az_chrysocolla_:  71%|███████   | 862/1213 [02:14<31:03,  5.31s/issue, pages=8, discovered=208][A
+Issues in az_chrysocolla_:  71%|███████   | 863/1213 [02:14<29:49,  5.11s/issue, pages=8, discovered=208][A
+Issues in az_chrysocolla_:  71%|███████   | 863/1213 [02:18<29:49,  5.11s/issue, pages=8, discovered=216][A
+Issues in az_chrysocolla_:  71%|███████   | 864/1213 [02:18<29:30,  5.07s/issue, pages=8, discovered=216][A
+Issues in az_chrysocolla_:  71%|███████   | 864/1213 [02:23<29:30,  5.07s/issue, pages=8, discovered=224][A
+Issues in az_chrysocolla_:  71%|███████▏  | 865/1213 [02:23<29:09,  5.03s/issue, pages=8, discovered=224][A
+Issues in az_chrysocolla_:  71%|███████▏  | 865/1213 [02:28<29:09,  5.03s/issue, pages=8, discovered=232][A
+Issues in az_chrysocolla_:  71%|███████▏  | 866/1213 [02:28<28:55,  5.00s/issue, pages=8, discovered=232][A
+Issues in az_chrysocolla_:  71%|███████▏  | 866/1213 [02:33<28:55,  5.00s/issue, pages=8, discovered=240][A
+Issues in az_chrysocolla_:  71%|███████▏  | 867/1213 [02:33<28:15,  4.90s/issue, pages=8, discovered=240][A
+Issues in az_chrysocolla_:  71%|███████▏  | 867/1213 [02:38<28:15,  4.90s/issue, pages=8, discovered=248][A
+Issues in az_chrysocolla_:  72%|███████▏  | 868/1213 [02:38<28:40,  4.99s/issue, pages=8, discovered=248][A
+Issues in az_chrysocolla_:  72%|███████▏  | 868/1213 [02:43<28:40,  4.99s/issue, pages=8, discovered=256][A
+Issues in az_chrysocolla_:  72%|███████▏  | 869/1213 [02:43<28:15,  4.93s/issue, pages=8, discovered=256][A
+Issues in az_chrysocolla_:  72%|███████▏  | 869/1213 [02:48<28:15,  4.93s/issue, pages=8, discovered=264][A
+Issues in az_chrysocolla_:  72%|███████▏  | 870/1213 [02:48<28:10,  4.93s/issue, pages=8, discovered=264][A
+Issues in az_chrysocolla_:  72%|███████▏  | 870/1213 [02:53<28:10,  4.93s/issue, pages=8, discovered=272][A
+Issues in az_chrysocolla_:  72%|███████▏  | 871/1213 [02:53<28:09,  4.94s/issue, pages=8, discovered=272][A
+Issues in az_chrysocolla_:  72%|███████▏  | 871/1213 [02:58<28:09,  4.94s/issue, pages=8, discovered=280][A
+Issues in az_chrysocolla_:  72%|███████▏  | 872/1213 [02:58<29:05,  5.12s/issue, pages=8, discovered=280][A
+Issues in az_chrysocolla_:  72%|███████▏  | 872/1213 [03:04<29:05,  5.12s/issue, pages=8, discovered=288][A
+Issues in az_chrysocolla_:  72%|███████▏  | 873/1213 [03:04<29:33,  5.22s/issue, pages=8, discovered=288][A
+Issues in az_chrysocolla_:  72%|███████▏  | 873/1213 [03:10<29:33,  5.22s/issue, pages=8, discovered=296][A
+Issues in az_chrysocolla_:  72%|███████▏  | 874/1213 [03:10<30:26,  5.39s/issue, pages=8, discovered=296][A
+Issues in az_chrysocolla_:  72%|███████▏  | 874/1213 [03:15<30:26,  5.39s/issue, pages=8, discovered=304][A
+Issues in az_chrysocolla_:  72%|███████▏  | 875/1213 [03:15<30:09,  5.35s/issue, pages=8, discovered=304][A
+Issues in az_chrysocolla_:  72%|███████▏  | 875/1213 [03:20<30:09,  5.35s/issue, pages=8, discovered=312][A
+Issues in az_chrysocolla_:  72%|███████▏  | 876/1213 [03:20<28:55,  5.15s/issue, pages=8, discovered=312][A

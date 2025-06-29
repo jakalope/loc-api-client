@@ -370,7 +370,6 @@ class DownloadProcessor:
         batch_updates = []
         
         # Process downloads with progress tracking and batched database updates
-        from .utils.progress import ProgressTracker
         
         with ProgressTracker(total=len(queue_items), desc=f"Downloading batch", unit="files") as progress:
             for i, item in enumerate(queue_items):

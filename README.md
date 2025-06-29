@@ -31,7 +31,8 @@ The **LoC Chronicling America Client** provides automated workflows for large-sc
 - **Comprehensive statistics** - Track discovery progress and download metrics
 - **Flexible filtering** - Download by priority, type, date range, or state
 - **Database tracking** - SQLite-based metadata and progress storage
-- **Interactive CLI** - Full-featured command-line interface
+- **Interactive CLI** - Modular command-line interface with grouped commands
+- **Memory efficiency** - Batch processing for handling large newspaper collections
 
 ## Quick Start
 
@@ -74,7 +75,10 @@ python main.py download-stats
 
 ### 🏛️ **Large-Scale Historical Collection**
 ```bash
-# 1. Discover all available periodicals
+# 1. List all available newspapers with statistics
+python main.py newspaper list-newspapers
+
+# 2. Discover all available periodicals
 python main.py discover --max-papers 1000
 
 # 2. Create systematic date facets
@@ -88,6 +92,9 @@ python main.py download-priority --priority 1 --max-items 50
 
 # 5. Monitor progress
 python main.py discovery-status
+
+# 6. Check overall system status
+python main.py newspaper status
 ```
 
 ### 📰 **Focused State/Event Collection**
@@ -112,14 +119,50 @@ python main.py setup-download-workflow \
 # Test discovery with small dataset
 python main.py test-discovery --year 1906 --max-items 20
 
+# Search for specific newspapers
+python main.py newspaper search-newspapers --state "California" --limit 10
+
 # Search for specific content
 python main.py search-text "earthquake" --date1 1906 --date2 1907 --limit 100
 
-# Download specific newspaper
-python main.py download-newspaper sn84038012 --date1 1906 --date2 1906
+# Download specific newspaper with size estimation
+python main.py newspaper download-newspaper sn84038012 --date1 1906 --date2 1906 --estimate-only
+
+# Download specific newspaper after confirming size
+python main.py newspaper download-newspaper sn84038012 --date1 1906 --date2 1906
 ```
 
 ## Advanced Commands
+
+### 📰 **Newspaper Commands**
+The CLI now features a modular command structure with dedicated newspaper operations:
+
+- `newspaper list-newspapers` - List all available newspapers with statistics
+  - Batch processing for memory efficiency with large datasets
+  - Shows top states, languages, and date coverage
+  ```bash
+  python main.py newspaper list-newspapers
+  ```
+
+- `newspaper search-newspapers` - Search newspapers with filters
+  - Filter by state, language, or limit results
+  ```bash
+  python main.py newspaper search-newspapers --state "California" --limit 20
+  python main.py newspaper search-newspapers --language "Spanish" --limit 10
+  ```
+
+- `newspaper download-newspaper` - Download specific newspaper by LCCN
+  - Size estimation and confirmation for large downloads
+  - Progress tracking with session management
+  ```bash
+  python main.py newspaper download-newspaper sn84038012 --date1 1906 --date2 1906
+  python main.py newspaper download-newspaper sn84038012 --estimate-only
+  ```
+
+- `newspaper status` - Comprehensive system status and statistics
+  ```bash
+  python main.py newspaper status
+  ```
 
 ### Discovery & Planning
 - `discover` - Catalog available periodicals from LoC
@@ -145,7 +188,6 @@ python main.py download-newspaper sn84038012 --date1 1906 --date2 1906
 ### Workflow Automation
 - `setup-download-workflow` - Complete automated setup
 - `status` - Overall system status
-- `search-newspapers` - Search available newspapers
 - `search-text` - Search content across archives
 
 ## Configuration
@@ -175,7 +217,12 @@ newsagger/
 │   ├── processor.py       # API response processing
 │   ├── storage.py         # SQLite database operations
 │   ├── config.py          # Configuration management
-│   └── cli.py             # Command-line interface
+│   ├── cli.py             # Command-line interface (legacy)
+│   ├── cli_new.py         # Modular CLI with command groups
+│   └── commands/          # Modular command implementations
+│       ├── __init__.py
+│       ├── newspaper.py   # Newspaper-specific commands
+│       └── remaining.py   # Commands being refactored
 ├── tests/                 # Comprehensive test suite
 ├── downloads/             # Downloaded content (auto-created)
 ├── data/                  # Database storage (auto-created)

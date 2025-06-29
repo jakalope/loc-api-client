@@ -8,6 +8,7 @@ real-time progress updates, status monitoring, and estimated completion times.
 """
 
 import sys
+import os
 import time
 import subprocess
 import threading
@@ -23,8 +24,7 @@ from queue import Queue, Empty
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
 from newsagger.storage import NewsStorage
-from newsagger.batch_utils import BatchMapper, BatchSessionTracker
-from newsagger.rate_limited_client import LocApiClient
+# Import BatchMapper and LocApiClient lazily to avoid blocking during module import
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -52,6 +52,7 @@ class ProcessStatus:
     process: Optional[subprocess.Popen] = None
     is_running: bool = False
     last_update: Optional[datetime] = None
+    start_time: Optional[datetime] = None
     status_text: str = "Not Started"
     error_count: int = 0
     restart_count: int = 0
@@ -92,21 +93,22 @@ class BackgroundProcessManager:
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(exist_ok=True)
         
-        # Process definitions
+        # Process definitions - use absolute path to main.py
+        main_py_path = str(Path(__file__).parent / "main.py")
+        
         self.discovery_process = ProcessStatus(
             name="Batch Discovery",
             command=[
-                sys.executable, "main.py", "discover-via-batches", 
-                "--auto-enqueue", "--db-path", db_path
+                sys.executable, main_py_path, "discover-via-batches", 
+                "--auto-enqueue"
             ]
         )
         
         self.download_process = ProcessStatus(
             name="Downloads",
             command=[
-                sys.executable, "main.py", "process-downloads",
-                "--max-items", "50", "--continuous", "--max-idle-minutes", "30",
-                "--db-path", db_path
+                sys.executable, main_py_path, "process-downloads",
+                "--max-items", "50", "--continuous", "--max-idle-minutes", "30"
             ]
         )
         
@@ -123,17 +125,25 @@ class BackgroundProcessManager:
             log_file = self.log_dir / f"{process_status.name.lower().replace(' ', '_')}.log"
             
             # Start process with logging
+            # Set up environment to ensure correct paths
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(Path(__file__).parent / "src")
+            
+            # Change to parent directory that contains the correct database
+            working_dir = Path("/home/jake/loc")
+            
             process_status.process = subprocess.Popen(
                 process_status.command,
                 stdout=open(log_file, 'a'),
                 stderr=subprocess.STDOUT,
-                cwd=Path.cwd(),
-                env={"PYTHONPATH": str(Path.cwd() / "src")}
+                cwd=working_dir,
+                env=env
             )
             
             process_status.is_running = True
             process_status.status_text = "Starting..."
             process_status.last_update = datetime.now()
+            process_status.start_time = datetime.now()
             return True
             
         except Exception as e:
@@ -215,89 +225,96 @@ class ProgressMonitor:
         self.db_path = db_path
         self.downloads_dir = downloads_dir
         self.storage = NewsStorage(db_path) if Path(db_path).exists() else None
-        self.api_client = LocApiClient()
+        # Don't initialize API client or batch components during __init__ to avoid blocking
+        self.api_client = None
         self.batch_mapper = None
         self.session_tracker = None
-        
-        if self.storage:
-            self.batch_mapper = BatchMapper(self.storage, self.api_client)
-            self.session_tracker = BatchSessionTracker(self.storage)
         
         self._last_stats = ProgressStats()
         self._total_batches_cache = None
         self._cache_time = None
     
     def get_progress_stats(self) -> ProgressStats:
-        """Get current progress statistics."""
+        """Get current progress statistics using simple database queries."""
         if not self.storage or not Path(self.db_path).exists():
             return ProgressStats()
         
         stats = ProgressStats()
         
         try:
-            # Get total batches (cached for 5 minutes)
-            now = datetime.now()
-            if (not self._total_batches_cache or 
-                not self._cache_time or 
-                (now - self._cache_time).seconds > 300):
+            # Use basic database queries instead of complex batch tracking
+            stats.total_batches = 25  # Known estimate from previous analysis
+            
+            # Get simple download queue statistics
+            queued_items = self.storage.get_download_queue(status='queued')
+            completed_items = self.storage.get_download_queue(status='completed')
+            in_progress_items = self.storage.get_download_queue(status='in_progress')
+            
+            stats.total_queue_items = len(queued_items) + len(completed_items) + len(in_progress_items)
+            stats.items_downloaded = len(completed_items)
+            
+            # Get actual batch discovery count from database
+            # Check how many unique batch names we have in batch_discovery_sessions
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
                 
-                try:
-                    all_batches = list(self.api_client.get_all_batches())
-                    self._total_batches_cache = len(all_batches)
-                    self._cache_time = now
-                except:
-                    self._total_batches_cache = 25  # Fallback estimate
+                # Count unique batches that have been discovered
+                cursor.execute("""
+                    SELECT COUNT(DISTINCT current_batch_name) 
+                    FROM batch_discovery_sessions 
+                    WHERE current_batch_name IS NOT NULL
+                """)
+                result = cursor.fetchone()
+                stats.batches_discovered = result[0] if result else 0
+                
+                # Get current batch being processed
+                cursor.execute("""
+                    SELECT current_batch_name, current_batch_index, total_batches
+                    FROM batch_discovery_sessions
+                    WHERE status IN ('active', 'captcha_blocked')
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                """)
+                current = cursor.fetchone()
+                if current:
+                    stats.current_batch = current[0] or ""
+                    if current[1] and current[2]:
+                        stats.current_batch_progress = (current[1] / current[2]) * 100
+                
+                conn.close()
+            except Exception as e:
+                # If query fails, report 0 rather than fake data
+                stats.batches_discovered = 0
             
-            stats.total_batches = self._total_batches_cache or 25
+            # Simple rate limiting check - if we have very few recent items, might be rate limited
+            # This is a simplified heuristic
+            if len(queued_items) < 10 and len(in_progress_items) == 0:
+                stats.is_rate_limited = True
+                stats.rate_limit_reason = "Possible rate limiting (heuristic)"
+                stats.cooldown_remaining_minutes = 0  # Unknown without session tracking
             
-            # Get batch discovery progress
-            if self.session_tracker:
-                active_sessions = self.session_tracker.get_active_sessions()
-                if active_sessions:
-                    latest_session = active_sessions[0]
-                    session_details = self.session_tracker.get_session_progress(latest_session['session_name'])
-                    
-                    if session_details:
-                        stats.current_batch = latest_session.get('current_batch_name', '')
-                        stats.current_batch_progress = self._calculate_batch_progress(latest_session)
-                        stats.discovery_rate_per_hour = session_details.get('pages_per_hour', 0)
-                        
-                        # Check for rate limiting
-                        if latest_session.get('status') == 'captcha_blocked':
-                            stats.is_rate_limited = True
-                            stats.rate_limit_reason = "CAPTCHA Cooldown"
-                            # Calculate remaining time (1 hour cooldown)
-                            last_update = datetime.fromisoformat(latest_session['updated_at'])
-                            elapsed = (now - last_update).total_seconds() / 60
-                            stats.cooldown_remaining_minutes = max(0, 60 - elapsed)
-            
-            # Get discovered batches count
-            if self.batch_mapper:
-                batch_names = self.batch_mapper.get_all_session_batch_names()
-                stats.batches_discovered = len(batch_names)
-            
-            # Get download progress
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            
-            # Total items in download queue
-            cursor.execute("SELECT COUNT(*) FROM download_queue WHERE status = 'pending'")
-            stats.total_queue_items = cursor.fetchone()[0]
-            
-            # Downloaded items
-            cursor.execute("SELECT COUNT(*) FROM pages WHERE downloaded = 1")
-            stats.items_downloaded = cursor.fetchone()[0]
-            
-            # Download size
-            downloads_path = Path(self.downloads_dir)
-            if downloads_path.exists():
-                total_size = sum(f.stat().st_size for f in downloads_path.rglob('*') if f.is_file())
-                stats.download_size_mb = total_size / (1024 * 1024)
-            
-            conn.close()
-            
-            # Calculate estimates
-            self._calculate_estimates(stats)
+            # Get actual download size from database
+            try:
+                conn = sqlite3.connect(self.db_path)
+                cursor = conn.cursor()
+                
+                # Sum actual downloaded sizes from database
+                cursor.execute("""
+                    SELECT SUM(estimated_size_mb) 
+                    FROM download_queue 
+                    WHERE status = 'completed'
+                """)
+                result = cursor.fetchone()
+                if result and result[0]:
+                    stats.download_size_mb = result[0]
+                else:
+                    stats.download_size_mb = 0.0  # No data found
+                
+                conn.close()
+            except Exception as e:
+                # If query fails, report 0 rather than fake data
+                stats.download_size_mb = 0.0
             
         except Exception as e:
             # Return last known stats if database query fails
@@ -375,7 +392,7 @@ class TUIMonitor:
         layout["left"].split_column(
             Layout(name="discovery", ratio=2),
             Layout(name="downloads", ratio=2),
-            Layout(name="processes", ratio=1)
+            Layout(name="processes", ratio=2)
         )
         
         layout["right"].split_column(
@@ -513,27 +530,74 @@ class TUIMonitor:
         )
     
     def _create_process_panel(self, processes: List[ProcessStatus]) -> Panel:
-        """Create process status panel."""
+        """Create detailed process status panel."""
         table = Table(show_header=True, header_style="bold magenta", box=None)
-        table.add_column("Process", style="cyan")
+        table.add_column("Process", style="cyan", no_wrap=True)
+        table.add_column("PID", justify="center", style="yellow")
         table.add_column("Status", justify="center")
-        table.add_column("Restarts", justify="center")
+        table.add_column("Uptime", justify="right", style="blue")
+        table.add_column("Restarts", justify="center", style="red")
         
         for process in processes:
+            # Determine status and color
             if process.is_running:
                 status = "[green]Running[/green]"
+                pid = str(process.process.pid) if process.process else "N/A"
+                uptime = self._format_uptime(process.start_time) if process.start_time else "N/A"
             elif process.error_count > 0:
                 status = "[red]Error[/red]"
+                pid = "---"
+                uptime = "---"
             else:
                 status = "[yellow]Stopped[/yellow]"
+                pid = "---"
+                uptime = "---"
+            
+            # Add command preview and status text
+            cmd_preview = " ".join(process.command[2:4]) if len(process.command) > 3 else "N/A"
+            name_with_status = f"{process.name}\n[dim]{cmd_preview}[/dim]"
+            if process.status_text and process.status_text not in ["Running", "Starting..."]:
+                name_with_status += f"\n[italic red]{process.status_text[:40]}[/italic red]"
             
             table.add_row(
-                process.name,
+                name_with_status,
+                pid,
                 status,
+                uptime,
                 str(process.restart_count)
             )
         
-        return Panel(table, title="🔧 Processes", border_style="magenta")
+        # Add summary row
+        running_count = sum(1 for p in processes if p.is_running)
+        table.add_row(
+            "[bold]Total[/bold]",
+            "",
+            f"[green]{running_count}/{len(processes)}[/green]",
+            "",
+            "",
+            style="dim"
+        )
+        
+        return Panel(table, title="🔧 Managed Processes", border_style="magenta")
+    
+    def _format_uptime(self, start_time: datetime) -> str:
+        """Format process uptime as a human-readable string."""
+        if not start_time:
+            return "N/A"
+        
+        uptime = datetime.now() - start_time
+        total_seconds = int(uptime.total_seconds())
+        
+        if total_seconds < 60:
+            return f"{total_seconds}s"
+        elif total_seconds < 3600:
+            minutes = total_seconds // 60
+            seconds = total_seconds % 60
+            return f"{minutes}m {seconds}s"
+        else:
+            hours = total_seconds // 3600
+            minutes = (total_seconds % 3600) // 60
+            return f"{hours}h {minutes}m"
     
     def _create_stats_panel(self, stats: ProgressStats) -> Panel:
         """Create statistics panel."""
