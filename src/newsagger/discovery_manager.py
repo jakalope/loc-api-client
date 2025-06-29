@@ -1168,15 +1168,44 @@ class DiscoveryManager:
             
             self.logger.info(f"Will process {total_batches} of {len(all_batches)} available batches")
             
-            # Create progress bar for batches
+            # Check for existing session to resume from
+            session_name = "batch_discovery_main"
+            existing_session = self.storage.get_batch_discovery_session(session_name)
+            
+            start_batch_index = 0
+            start_issue_index = 0
+            
+            if existing_session:
+                start_batch_index = existing_session.get('current_batch_index', 0)
+                start_issue_index = existing_session.get('current_issue_index', 0)
+                discovered_pages = existing_session.get('total_pages_discovered', 0)
+                enqueued_pages = existing_session.get('total_pages_enqueued', 0)
+                
+                self.logger.info(f"Resuming from batch {start_batch_index}, issue {start_issue_index}")
+                self.logger.info(f"Previous progress: {discovered_pages} discovered, {enqueued_pages} enqueued")
+            else:
+                # Create new session
+                self.storage.create_batch_discovery_session(
+                    session_name=session_name,
+                    total_batches=total_batches,
+                    auto_enqueue=auto_enqueue
+                )
+                self.logger.info("Created new batch discovery session")
+            
+            # Create progress bar for batches (accounting for resume)
             batch_pbar = tqdm(
                 total=total_batches,
                 desc="Processing batches",
                 unit="batch",
-                position=0
+                position=0,
+                initial=start_batch_index  # Start from resume position
             )
             
-            for batch in all_batches:
+            for batch_index, batch in enumerate(all_batches):
+                # Skip batches that were already processed
+                if batch_index < start_batch_index:
+                    continue
+                    
                 if max_batches and processed_batches >= max_batches:
                     break
                 
@@ -1186,6 +1215,15 @@ class DiscoveryManager:
                     batch_url = batch.get('url', '')
                     
                     batch_page_count = batch.get('page_count', 0)
+                    
+                    # Update session with current batch
+                    self.storage.update_batch_discovery_session(
+                        session_name=session_name,
+                        current_batch_index=batch_index,
+                        current_batch_name=batch_name,
+                        current_issue_index=0,  # Reset issue index for new batch
+                        total_issues_in_batch=0  # Will be updated when we get batch details
+                    )
                     
                     # Update batch progress bar
                     batch_pbar.set_description(f"Processing {batch_name[:20]}...")
@@ -1213,16 +1251,32 @@ class DiscoveryManager:
                         batch_discovered = 0
                         batch_enqueued = 0
                         
-                        # Create progress bar for issues in this batch
+                        # Update session with total issues in this batch
+                        self.storage.update_batch_discovery_session(
+                            session_name=session_name,
+                            total_issues_in_batch=len(batch_issues)
+                        )
+                        
+                        # Determine starting issue index for this batch
+                        current_issue_start = 0
+                        if batch_index == start_batch_index:
+                            # This is the batch we're resuming from
+                            current_issue_start = start_issue_index
+                        
+                        # Create progress bar for issues in this batch (accounting for resume)
                         issue_pbar = tqdm(
                             total=len(batch_issues),
                             desc=f"Issues in {batch_name[:15]}",
                             unit="issue",
                             position=1,
-                            leave=False
+                            leave=False,
+                            initial=current_issue_start  # Start from resume position
                         )
                         
                         for issue_idx, issue_data in enumerate(batch_issues, 1):
+                            # Skip issues that were already processed (only in resume batch)
+                            if batch_index == start_batch_index and issue_idx <= start_issue_index:
+                                continue
                             # Each issue has its own URL - we need to fetch it to get pages
                             issue_url = issue_data.get('url', '')
                             if issue_url:
@@ -1263,11 +1317,26 @@ class DiscoveryManager:
                                             batch_discovered += stored_count
                                             enqueued_pages += enqueued_count
                                             batch_enqueued += enqueued_count
+                                            
+                                            # Update session progress
+                                            self.storage.update_batch_discovery_session(
+                                                session_name=session_name,
+                                                current_issue_index=issue_idx,
+                                                pages_discovered_delta=stored_count,
+                                                pages_enqueued_delta=enqueued_count
+                                            )
                                         else:
                                             # Just store pages without enqueueing
                                             stored_count = self.storage.store_pages(batch_pages)
                                             discovered_pages += stored_count
                                             batch_discovered += stored_count
+                                            
+                                            # Update session progress
+                                            self.storage.update_batch_discovery_session(
+                                                session_name=session_name,
+                                                current_issue_index=issue_idx,
+                                                pages_discovered_delta=stored_count
+                                            )
                                 except Exception as e:
                                     self.logger.error(f"Error processing issue {issue_url}: {e}")
                                     continue
@@ -1323,6 +1392,12 @@ class DiscoveryManager:
             'errors': errors,
             'method': 'batch_discovery'
         }
+        
+        # Complete the session
+        try:
+            self.storage.complete_batch_discovery_session(session_name)
+        except:
+            pass  # Don't fail on session cleanup
         
         self.logger.info(f"Batch discovery complete: {processed_batches} batches, "
                         f"{discovered_pages} pages discovered, {enqueued_pages} enqueued")
