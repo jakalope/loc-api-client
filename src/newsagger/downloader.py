@@ -44,11 +44,28 @@ class DownloadProcessor:
         })
     
     def process_queue(self, max_items: int = None, max_size_mb: float = None, 
-                     dry_run: bool = False) -> Dict:
+                     dry_run: bool = False, continuous: bool = False, 
+                     max_idle_minutes: int = 10) -> Dict:
         """
         Process the download queue.
+        
+        Args:
+            max_items: Maximum number of items to process (per batch if continuous)
+            max_size_mb: Maximum total size to download
+            dry_run: If True, only simulate processing
+            continuous: If True, continuously check for new items
+            max_idle_minutes: In continuous mode, stop after this many minutes without new items
+        
         Returns statistics about the download session.
         """
+        if continuous:
+            return self._process_queue_continuous(max_items, max_size_mb, dry_run, max_idle_minutes)
+        else:
+            return self._process_queue_single_batch(max_items, max_size_mb, dry_run)
+    
+    def _process_queue_single_batch(self, max_items: int = None, max_size_mb: float = None, 
+                                   dry_run: bool = False) -> Dict:
+        """Original single-batch processing logic."""
         self.logger.info("Starting download queue processing...")
         
         # Get queued items ordered by priority
@@ -162,6 +179,211 @@ class DownloadProcessor:
                         f"{stats['errors']} errors, {stats['total_size_mb']:.1f} MB total")
         
         return stats
+    
+    def _process_queue_continuous(self, max_items: int = None, max_size_mb: float = None, 
+                                 dry_run: bool = False, max_idle_minutes: int = 10) -> Dict:
+        """
+        Continuously process download queue items as they become available.
+        
+        Args:
+            max_items: Maximum items per batch (not total limit)
+            max_size_mb: Total size limit across all batches
+            dry_run: If True, only simulate processing
+            max_idle_minutes: Stop after this many minutes without new items
+        """
+        import time
+        from datetime import datetime, timedelta
+        
+        self.logger.info("Starting continuous download queue processing...")
+        self.logger.info(f"Will stop after {max_idle_minutes} minutes without new items")
+        
+        # Global tracking across all batches
+        global_stats = {
+            "downloaded": 0,
+            "errors": 0, 
+            "skipped": 0,
+            "total_size_mb": 0.0,
+            "batches_processed": 0,
+            "start_time": datetime.now()
+        }
+        
+        last_activity_time = datetime.now()
+        batch_size = max_items or 50  # Default batch size
+        poll_interval = 30  # Check for new items every 30 seconds
+        
+        self.logger.info(f"Batch size: {batch_size}, Poll interval: {poll_interval}s")
+        
+        while True:
+            # Check if we should stop due to inactivity
+            time_since_activity = datetime.now() - last_activity_time
+            if time_since_activity > timedelta(minutes=max_idle_minutes):
+                self.logger.info(f"Stopping after {max_idle_minutes} minutes without new items")
+                break
+            
+            # Check for new items in queue
+            queue_items = self.storage.get_download_queue(status='queued')
+            
+            if not queue_items:
+                self.logger.debug(f"No items in queue, waiting {poll_interval}s...")
+                time.sleep(poll_interval)
+                continue
+            
+            # Process a batch of items
+            batch_items = queue_items[:batch_size]
+            
+            # Check size limit (cumulative across all batches)
+            if max_size_mb:
+                filtered_batch = []
+                for item in batch_items:
+                    estimated_new_total = global_stats["total_size_mb"] + item['estimated_size_mb']
+                    if estimated_new_total <= max_size_mb:
+                        filtered_batch.append(item)
+                    else:
+                        self.logger.info(f"Size limit reached ({max_size_mb} MB), stopping")
+                        break
+                
+                if not filtered_batch:
+                    self.logger.info("No more items can be processed within size limit")
+                    break
+                    
+                batch_items = filtered_batch
+            
+            if not batch_items:
+                time.sleep(poll_interval)
+                continue
+            
+            self.logger.info(f"Processing batch {global_stats['batches_processed'] + 1} with {len(batch_items)} items")
+            
+            if dry_run:
+                # Simulate processing for dry run
+                batch_size_mb = sum(item['estimated_size_mb'] for item in batch_items)
+                global_stats["would_download"] = global_stats.get("would_download", 0) + len(batch_items)
+                global_stats["estimated_size_mb"] = global_stats.get("estimated_size_mb", 0) + batch_size_mb
+                global_stats["batches_processed"] += 1
+                
+                self.logger.info(f"DRY RUN: Would download {len(batch_items)} items ({batch_size_mb:.1f} MB)")
+                
+                # Mark items as processed in dry run
+                for item in batch_items:
+                    self.storage.update_download_queue_status(item['id'], 'completed')
+                
+                last_activity_time = datetime.now()
+                time.sleep(poll_interval)
+                continue
+            
+            # Process the batch using existing single-batch logic
+            try:
+                batch_stats = self._process_batch_items(batch_items)
+                
+                # Update global stats
+                global_stats["downloaded"] += batch_stats.get("downloaded", 0)
+                global_stats["errors"] += batch_stats.get("errors", 0)
+                global_stats["skipped"] += batch_stats.get("skipped", 0)
+                global_stats["total_size_mb"] += batch_stats.get("total_size_mb", 0)
+                global_stats["batches_processed"] += 1
+                
+                self.logger.info(f"Batch complete: {batch_stats.get('downloaded', 0)} downloaded, "
+                               f"{batch_stats.get('errors', 0)} errors, "
+                               f"{batch_stats.get('total_size_mb', 0):.1f} MB")
+                
+                # Update activity time if we processed items
+                if batch_stats.get("downloaded", 0) > 0:
+                    last_activity_time = datetime.now()
+                
+            except Exception as e:
+                self.logger.error(f"Error processing batch: {e}")
+                global_stats["errors"] += len(batch_items)
+                time.sleep(poll_interval)
+            
+            # Brief pause between batches to avoid overwhelming the system
+            time.sleep(5)
+        
+        # Final statistics
+        global_stats["end_time"] = datetime.now()
+        global_stats["duration_minutes"] = (global_stats["end_time"] - global_stats["start_time"]).total_seconds() / 60
+        
+        self.logger.info(f"Continuous processing complete: {global_stats['downloaded']} downloaded, "
+                        f"{global_stats['errors']} errors, {global_stats['total_size_mb']:.1f} MB total "
+                        f"across {global_stats['batches_processed']} batches")
+        
+        return global_stats
+    
+    def _process_batch_items(self, queue_items: List[Dict]) -> Dict:
+        """Process a batch of queue items using the existing logic."""
+        # Re-use the existing processing logic but without the initial queue fetch
+        total_size_mb = 0
+        start_time = datetime.now()
+        batch_updates = []
+        
+        # Process downloads with progress tracking and batched database updates
+        from .utils.progress import ProgressTracker
+        
+        with ProgressTracker(total=len(queue_items), desc=f"Downloading batch", unit="files") as progress:
+            for i, item in enumerate(queue_items):
+                # Mark as in-progress
+                self.storage.update_download_queue_status(item['id'], 'in_progress')
+                
+                try:
+                    # Process the item
+                    result = self._process_queue_item(item)
+                    
+                    if result['success']:
+                        progress.update(1, success=True)
+                        total_size_mb += result.get('size_mb', 0)
+                        
+                        # Mark as completed
+                        batch_updates.append({
+                            'id': item['id'],
+                            'status': 'completed',
+                            'downloaded_at': datetime.now().isoformat(),
+                            'file_path': result.get('file_path'),
+                            'actual_size_mb': result.get('size_mb', 0)
+                        })
+                        
+                    else:
+                        progress.update(1, success=False)
+                        
+                        # Mark as failed
+                        batch_updates.append({
+                            'id': item['id'],
+                            'status': 'failed',
+                            'error_message': result.get('error'),
+                            'failed_at': datetime.now().isoformat()
+                        })
+                
+                except Exception as e:
+                    self.logger.error(f"Error processing queue item {item['id']}: {e}")
+                    progress.update(1, success=False)
+                    
+                    batch_updates.append({
+                        'id': item['id'],
+                        'status': 'failed',
+                        'error_message': str(e),
+                        'failed_at': datetime.now().isoformat()
+                    })
+                
+                # Process database updates in batches
+                if len(batch_updates) >= 10:
+                    self._process_batch_updates(batch_updates)
+                    batch_updates = []
+            
+            # Process remaining updates
+            if batch_updates:
+                self._process_batch_updates(batch_updates)
+        
+        # Get final statistics
+        final_stats = progress.get_stats()
+        end_time = datetime.now()
+        
+        return {
+            "downloaded": final_stats['success'],
+            "errors": final_stats['errors'],
+            "skipped": final_stats['skipped'],
+            "total_size_mb": total_size_mb,
+            "start_time": start_time,
+            "end_time": end_time,
+            "duration_minutes": (end_time - start_time).total_seconds() / 60
+        }
     
     def _process_queue_item(self, queue_item: Dict) -> Dict:
         """Process a single queue item based on its type."""
@@ -437,61 +659,88 @@ class DownloadProcessor:
             return thread_local.session
         
         def download_single_file(task):
-            """Download a single file using thread-local session."""
-            try:
-                url = task['url']
-                local_path = task['path']
-                file_type = task['type']
-                
-                # Check if file already exists
-                if local_path.exists():
-                    size_mb = local_path.stat().st_size / (1024 * 1024)
+            """Download a single file using thread-local session with retries."""
+            max_retries = 3
+            base_delay = 2.0
+            
+            for attempt in range(max_retries):
+                try:
+                    url = task['url']
+                    local_path = task['path']
+                    file_type = task['type']
+                    
+                    # Check if file already exists
+                    if local_path.exists():
+                        size_mb = local_path.stat().st_size / (1024 * 1024)
+                        return {
+                            'success': True,
+                            'file_path': str(local_path),
+                            'size_mb': size_mb,
+                            'skipped': True,
+                            'type': file_type
+                        }
+                    
+                    session = get_session()
+                    
+                    # Download with streaming
+                    response = session.get(url, stream=True, timeout=120)
+                    response.raise_for_status()
+                    
+                    # Get file size
+                    total_size = int(response.headers.get('content-length', 0))
+                    
+                    # Write file with larger chunks for better I/O performance
+                    downloaded_size = 0
+                    with open(local_path, 'wb') as f:
+                        for chunk in response.iter_content(chunk_size=65536):  # 64KB chunks
+                            if chunk:
+                                f.write(chunk)
+                                downloaded_size += len(chunk)
+                    
+                    # Verify download
+                    if total_size > 0 and downloaded_size != total_size:
+                        local_path.unlink()  # Remove incomplete file
+                        raise requests.exceptions.RequestException(
+                            f"Download incomplete: {downloaded_size}/{total_size} bytes"
+                        )
+                    
+                    size_mb = downloaded_size / (1024 * 1024)
                     return {
                         'success': True,
                         'file_path': str(local_path),
                         'size_mb': size_mb,
-                        'skipped': True,
                         'type': file_type
                     }
-                
-                session = get_session()
-                
-                # Download with streaming
-                response = session.get(url, stream=True, timeout=120)
-                response.raise_for_status()
-                
-                # Get file size
-                total_size = int(response.headers.get('content-length', 0))
-                
-                # Write file with larger chunks for better I/O performance
-                downloaded_size = 0
-                with open(local_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=65536):  # 64KB chunks
-                        if chunk:
-                            f.write(chunk)
-                            downloaded_size += len(chunk)
-                
-                # Verify download
-                if total_size > 0 and downloaded_size != total_size:
-                    local_path.unlink()  # Remove incomplete file
-                    raise requests.exceptions.RequestException(
-                        f"Download incomplete: {downloaded_size}/{total_size} bytes"
-                    )
-                
-                size_mb = downloaded_size / (1024 * 1024)
-                return {
-                    'success': True,
-                    'file_path': str(local_path),
-                    'size_mb': size_mb,
-                    'type': file_type
-                }
-                
-            except Exception as e:
-                return {
-                    'success': False,
-                    'error': str(e),
-                    'type': task.get('type', 'unknown')
-                }
+                    
+                except Exception as e:
+                    # Clean up partial file if it exists
+                    if local_path.exists():
+                        try:
+                            local_path.unlink()
+                        except:
+                            pass
+                    
+                    # If this is the last attempt, return failure
+                    if attempt == max_retries - 1:
+                        return {
+                            'success': False,
+                            'error': str(e),
+                            'type': task.get('type', 'unknown'),
+                            'attempts': max_retries
+                        }
+                    
+                    # Otherwise, sleep and retry (exponential backoff)
+                    import time
+                    delay = base_delay * (2 ** attempt)
+                    time.sleep(delay)
+            
+            # Should never reach here, but just in case
+            return {
+                'success': False,
+                'error': 'Max retries exceeded',
+                'type': task.get('type', 'unknown'),
+                'attempts': max_retries
+            }
         
         # Execute downloads concurrently (increased workers for better throughput)
         results = []
@@ -502,10 +751,11 @@ class DownloadProcessor:
                 result = future.result()
                 results.append(result)
                 
-                # Log any failures
+                # Only log failures after all retries are exhausted
                 if not result['success']:
                     task = future_to_task[future]
-                    self.logger.warning(f"Failed to download {task['type']} file: {result['error']}")
+                    attempts = result.get('attempts', 1)
+                    self.logger.warning(f"Failed to download {task['type']} file after {attempts} attempts: {result['error']}")
         
         return results
 

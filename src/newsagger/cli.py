@@ -1888,12 +1888,14 @@ def show_queue(status, limit):
 # ===== DOWNLOAD PROCESSING COMMANDS =====
 
 @cli.command()
-@click.option('--max-items', default=None, type=int, help='Maximum items to download')
+@click.option('--max-items', default=None, type=int, help='Maximum items to download (per batch if continuous)')
 @click.option('--max-size-mb', default=None, type=float, help='Maximum total download size in MB')
 @click.option('--download-dir', default='./downloads', help='Directory to store downloaded files')
 @click.option('--file-types', default='pdf,jp2,ocr,metadata', help='Comma-separated file types to download (pdf,jp2,ocr,metadata)')
 @click.option('--dry-run', is_flag=True, help='Show what would be downloaded without actually doing it')
-def process_downloads(max_items, max_size_mb, download_dir, file_types, dry_run):
+@click.option('--continuous', is_flag=True, help='Continuously process new items as they become available')
+@click.option('--max-idle-minutes', default=10, type=int, help='In continuous mode, stop after this many minutes without new items')
+def process_downloads(max_items, max_size_mb, download_dir, file_types, dry_run, continuous, max_idle_minutes):
     """Process the download queue and download files."""
     config = Config()
     storage = NewsStorage(**config.get_storage_config())
@@ -1910,12 +1912,18 @@ def process_downloads(max_items, max_size_mb, download_dir, file_types, dry_run)
     
     downloader = DownloadProcessor(storage, client, download_dir, file_types_list)
     
+    mode = "continuous" if continuous else "single batch"
     action = "Would process" if dry_run else "Processing"
-    click.echo(f"📥 {action} download queue...")
+    click.echo(f"📥 {action} download queue ({mode} mode)...")
     if max_items:
-        click.echo(f"   📊 Max items: {max_items}")
+        if continuous:
+            click.echo(f"   📊 Max items per batch: {max_items}")
+        else:
+            click.echo(f"   📊 Max items: {max_items}")
     if max_size_mb:
         click.echo(f"   💾 Max size: {max_size_mb} MB")
+    if continuous:
+        click.echo(f"   ⏱️ Idle timeout: {max_idle_minutes} minutes")
     click.echo(f"   📁 Download directory: {download_dir}")
     click.echo(f"   📄 File types: {', '.join(file_types_list)}")
     
@@ -1923,13 +1931,17 @@ def process_downloads(max_items, max_size_mb, download_dir, file_types, dry_run)
         stats = downloader.process_queue(
             max_items=max_items,
             max_size_mb=max_size_mb,
-            dry_run=dry_run
+            dry_run=dry_run,
+            continuous=continuous,
+            max_idle_minutes=max_idle_minutes
         )
         
         if dry_run:
             click.echo(f"\n📊 Dry Run Results:")
             click.echo(f"   Would download: {stats.get('would_download', 0)} items")
             click.echo(f"   Estimated size: {stats.get('estimated_size_mb', 0):.1f} MB")
+            if continuous and 'batches_processed' in stats:
+                click.echo(f"   Batches processed: {stats['batches_processed']}")
         else:
             click.echo(f"\n✅ Download processing complete!")
             click.echo(f"   📥 Downloaded: {stats['downloaded']} items")
@@ -1938,6 +1950,8 @@ def process_downloads(max_items, max_size_mb, download_dir, file_types, dry_run)
             click.echo(f"   💾 Total size: {stats['total_size_mb']:.1f} MB")
             if 'duration_minutes' in stats:
                 click.echo(f"   ⏱️ Duration: {stats['duration_minutes']:.1f} minutes")
+            if continuous and 'batches_processed' in stats:
+                click.echo(f"   📦 Batches processed: {stats['batches_processed']}")
             
             # Show updated queue stats
             queue_stats = storage.get_download_queue_stats()
