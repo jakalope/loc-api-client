@@ -333,22 +333,71 @@ class ProgressMonitor:
         return 0.0
     
     def _calculate_estimates(self, stats: ProgressStats):
-        """Calculate estimated completion times."""
+        """Calculate estimated completion times from database activity."""
         now = datetime.now()
         
-        # Discovery estimate
-        if stats.discovery_rate_per_hour > 0 and stats.batches_discovered < stats.total_batches:
-            remaining_batches = stats.total_batches - stats.batches_discovered
-            # Estimate pages per batch (rough estimate)
-            avg_pages_per_batch = 1000  # Conservative estimate
-            remaining_pages = remaining_batches * avg_pages_per_batch
-            hours_remaining = remaining_pages / stats.discovery_rate_per_hour
-            stats.estimated_discovery_completion = now + timedelta(hours=hours_remaining)
-        
-        # Download estimate  
-        if stats.download_rate_per_hour > 0 and stats.total_queue_items > 0:
-            hours_remaining = stats.total_queue_items / stats.download_rate_per_hour
-            stats.estimated_download_completion = now + timedelta(hours=hours_remaining)
+        # Try to calculate actual rates from database session activity
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Discovery estimate based on recent batch session activity
+            if stats.batches_discovered > 0 and stats.batches_discovered < stats.total_batches:
+                # Get recent session activity to calculate rate
+                cursor.execute("""
+                    SELECT 
+                        MIN(updated_at) as start_time,
+                        MAX(updated_at) as end_time,
+                        COUNT(*) as total_updates
+                    FROM batch_discovery_sessions 
+                    WHERE updated_at > datetime('now', '-24 hours')
+                """)
+                result = cursor.fetchone()
+                
+                if result and result[0] and result[1] and result[2] > 1:
+                    try:
+                        start_time = datetime.fromisoformat(result[0])
+                        end_time = datetime.fromisoformat(result[1])
+                        duration_hours = (end_time - start_time).total_seconds() / 3600
+                        
+                        if duration_hours > 0:
+                            # Calculate pages per hour from actual activity
+                            estimated_pages_per_update = 10  # Conservative estimate
+                            pages_processed = result[2] * estimated_pages_per_update
+                            stats.discovery_rate_per_hour = pages_processed / duration_hours
+                            
+                            remaining_batches = stats.total_batches - stats.batches_discovered
+                            avg_pages_per_batch = 1000  # Conservative estimate
+                            remaining_pages = remaining_batches * avg_pages_per_batch
+                            hours_remaining = remaining_pages / stats.discovery_rate_per_hour
+                            stats.estimated_discovery_completion = now + timedelta(hours=hours_remaining)
+                    except:
+                        pass
+            
+            # Download estimate based on completed vs queued items
+            if stats.items_downloaded > 0 and stats.total_queue_items > stats.items_downloaded:
+                # Get recent download completion activity
+                cursor.execute("""
+                    SELECT COUNT(*) 
+                    FROM download_queue 
+                    WHERE status = 'completed' 
+                    AND updated_at > datetime('now', '-1 hour')
+                """)
+                recent_completions = cursor.fetchone()[0] if cursor.fetchone() else 0
+                
+                if recent_completions > 0:
+                    # Calculate hourly rate from recent activity
+                    stats.download_rate_per_hour = recent_completions
+                    
+                    remaining_items = stats.total_queue_items - stats.items_downloaded
+                    hours_remaining = remaining_items / stats.download_rate_per_hour
+                    stats.estimated_download_completion = now + timedelta(hours=hours_remaining)
+            
+            conn.close()
+            
+        except Exception as e:
+            # If we can't calculate from database, don't show estimates
+            pass
 
 
 class TUIMonitor:
