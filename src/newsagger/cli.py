@@ -1,5 +1,5 @@
 """
-Command Line Interface
+Command Line Interface - Modular Version
 
 Provides interactive CLI for newspaper selection and download management.
 """
@@ -9,11 +9,14 @@ import json
 from typing import List, Dict
 from tqdm import tqdm
 from .config import Config
-from .rate_limited_client import LocApiClient, CaptchaHandlingException
+from .rate_limited_client import LocApiClient, CaptchaHandlingException, GlobalCaptchaManager
 from .processor import NewsDataProcessor
 from .storage import NewsStorage
 from .discovery_manager import DiscoveryManager
 from .downloader import DownloadProcessor
+
+# Import command modules
+from .commands.newspaper import newspaper
 
 
 @click.group()
@@ -26,153 +29,8 @@ def cli(verbose):
     config.setup_logging()
 
 
-@cli.command()
-def list_newspapers():
-    """List available newspapers with filtering options."""
-    config = Config()
-    client = LocApiClient(**config.get_api_config())
-    processor = NewsDataProcessor()
-    
-    click.echo("Fetching newspaper list from Library of Congress...")
-    
-    with tqdm(desc="Loading newspapers") as pbar:
-        newspapers = []
-        for newspaper in client.get_all_newspapers():
-            newspapers.append(newspaper)
-            pbar.update(1)
-    
-    processed = processor.process_newspapers_response({'newspapers': newspapers})
-    
-    # Display summary
-    summary = processor.get_newspaper_summary(processed)
-    
-    click.echo(f"\n📰 Found {summary['total_newspapers']} newspapers")
-    
-    if summary.get('states'):
-        click.echo("\n🗺️  Top states:")
-        for state, count in list(summary['states'].items())[:10]:
-            click.echo(f"   {state}: {count}")
-    
-    if summary.get('languages'):
-        click.echo("\n🌐 Languages:")
-        for lang, count in summary['languages'].items():
-            click.echo(f"   {lang}: {count}")
-    
-    if summary.get('year_range'):
-        start, end = summary['year_range']
-        click.echo(f"\n📅 Date range: {start} - {end}")
-
-
-@cli.command()
-@click.option('--state', help='Filter by state')
-@click.option('--language', help='Filter by language')
-@click.option('--limit', default=10, help='Number of results to show')
-def search_newspapers(state, language, limit):
-    """Search newspapers with filters."""
-    config = Config()
-    storage = NewsStorage(**config.get_storage_config())
-    
-    newspapers = storage.get_newspapers(state=state, language=language)
-    
-    if not newspapers:
-        click.echo("No newspapers found matching criteria.")
-        return
-    
-    click.echo(f"Found {len(newspapers)} newspapers:\n")
-    
-    for i, newspaper in enumerate(newspapers[:limit]):
-        place = json.loads(newspaper['place_of_publication'])
-        langs = json.loads(newspaper['language'])
-        
-        click.echo(f"{i+1}. {newspaper['title']}")
-        click.echo(f"   LCCN: {newspaper['lccn']}")
-        click.echo(f"   Location: {', '.join(place)}")
-        click.echo(f"   Languages: {', '.join(langs)}")
-        click.echo(f"   Years: {newspaper['start_year']}-{newspaper['end_year']}")
-        click.echo()
-
-
-@cli.command()
-@click.argument('lccn')
-@click.option('--date1', default='1836', help='Start date (YYYY or YYYY-MM-DD)')
-@click.option('--date2', help='End date (YYYY or YYYY-MM-DD)')
-@click.option('--estimate-only', is_flag=True, help='Only show download estimate')
-def download_newspaper(lccn, date1, date2, estimate_only):
-    """Download pages for a specific newspaper."""
-    config = Config()
-    client = LocApiClient(**config.get_api_config())
-    processor = NewsDataProcessor()
-    storage = NewsStorage(**config.get_storage_config())
-    
-    # Validate date range
-    if not processor.validate_date_range(date1, date2 or str(config.current_year)):
-        click.echo("❌ Invalid date range")
-        return
-    
-    # Get estimate
-    estimate = client.estimate_download_size((date1, date2), lccn)
-    
-    click.echo(f"📊 Download Estimate for {lccn}:")
-    click.echo(f"   Total pages: {estimate['total_pages']:,}")
-    click.echo(f"   Estimated size: {estimate['estimated_size_gb']} GB")
-    click.echo(f"   Estimated time: {estimate['estimated_time_hours']:.1f} hours")
-    
-    if estimate_only:
-        return
-    
-    if estimate['total_pages'] > 10000:
-        if not click.confirm(f"This will download {estimate['total_pages']:,} pages. Continue?"):
-            return
-    
-    # Create download session
-    session_id = storage.create_download_session(
-        f"{lccn}_{date1}_{date2}",
-        {'lccn': lccn, 'date1': date1, 'date2': date2},
-        estimate['total_pages']
-    )
-    
-    # Start download with faceted search
-    base_query = {
-        'andtext': f'lccn:{lccn}',
-        'date1': date1,
-        'date2': date2
-    }
-    
-    total_downloaded = 0
-    
-    with tqdm(total=estimate['total_pages'], desc="Downloading pages") as pbar:
-        for result_batch in client.search_with_faceted_dates(base_query):
-            pages = processor.process_search_response(result_batch)
-            stored = storage.store_pages(pages)
-            
-            total_downloaded += stored
-            pbar.update(stored)
-            
-            # Update session progress
-            storage.update_session_progress(session_id, total_downloaded)
-    
-    # Complete session
-    storage.complete_session(session_id)
-    click.echo(f"✅ Downloaded {total_downloaded:,} pages")
-
-
-@cli.command()
-def status():
-    """Show download status and statistics."""
-    config = Config()
-    storage = NewsStorage(**config.get_storage_config())
-    stats = storage.get_storage_stats()
-    
-    click.echo("📊 Newsagger Status:")
-    click.echo(f"   Database size: {stats['db_size_mb']} MB")
-    click.echo(f"   Total newspapers: {stats['total_newspapers']:,}")
-    click.echo(f"   Total pages: {stats['total_pages']:,}")
-    click.echo(f"   Downloaded pages: {stats['downloaded_pages']:,}")
-    click.echo(f"   Active sessions: {stats['active_sessions']}")
-    
-    if stats['total_pages'] > 0:
-        progress = (stats['downloaded_pages'] / stats['total_pages']) * 100
-        click.echo(f"   Download progress: {progress:.1f}%")
+# Register command groups
+cli.add_command(newspaper)
 
 
 @cli.command()
@@ -1063,6 +921,67 @@ def auto_discover_facets(auto_enqueue, batch_size, max_items, skip_errors, timeo
             
     except Exception as e:
         click.echo(f"❌ Auto-discovery failed: {e}")
+
+
+@cli.command()
+@click.option('--max-batches', default=None, type=int, help='Maximum number of batches to process')
+@click.option('--auto-enqueue', is_flag=True, help='Automatically enqueue discovered content')
+@click.option('--rate-limit-delay', default=3.0, type=float, help='Delay between batch requests (seconds)')
+def discover_via_batches(max_batches, auto_enqueue, rate_limit_delay):
+    """Discover content via digitization batches (CAPTCHA-friendly alternative).
+    
+    This method uses the batches.json endpoint which is designed for bulk access
+    and should be much less likely to trigger CAPTCHA protection compared to
+    the search API used by auto-discover-facets.
+    """
+    config = Config()
+    
+    # Initialize components
+    api_client = LocApiClient()
+    processor = NewsDataProcessor()
+    storage = NewsStorage(**config.get_storage_config())
+    discovery_manager = DiscoveryManager(api_client, processor, storage)
+    
+    click.echo("🔍 Starting batch-based content discovery...")
+    click.echo(f"   📦 Max batches: {max_batches or 'unlimited'}")
+    click.echo(f"   ⬇️ Auto-enqueue: {'Yes' if auto_enqueue else 'No'}")
+    click.echo(f"   ⏱️ Rate limit delay: {rate_limit_delay}s")
+    
+    # Progress tracking
+    def progress_callback(processed, discovered, enqueued):
+        click.echo(f"   📦 Batches: {processed}, 📄 Pages: {discovered}, ⬇️ Enqueued: {enqueued}")
+    
+    try:
+        # Run batch discovery
+        stats = discovery_manager.discover_content_via_batches(
+            max_batches=max_batches,
+            auto_enqueue=auto_enqueue,
+            rate_limit_delay=rate_limit_delay,
+            progress_callback=progress_callback
+        )
+        
+        # Display results
+        click.echo(f"\n✅ Batch discovery complete!")
+        click.echo(f"   📦 Processed batches: {stats['processed_batches']}")
+        click.echo(f"   📄 Discovered pages: {stats['discovered_pages']}")
+        if auto_enqueue:
+            click.echo(f"   ⬇️ Enqueued pages: {stats['enqueued_pages']}")
+        if stats['errors'] > 0:
+            click.echo(f"   ❌ Errors: {stats['errors']}")
+        
+        # Show queue status
+        if auto_enqueue:
+            queue_stats = storage.get_download_queue_stats()
+            click.echo(f"\n📊 Queue Status:")
+            click.echo(f"   Queued: {queue_stats['queued']}")
+            click.echo(f"   Completed: {queue_stats['completed']}")
+        
+        if not auto_enqueue and stats['discovered_pages'] > 0:
+            click.echo(f"\n💡 Run with --auto-enqueue to queue discovered content for download.")
+            
+    except Exception as e:
+        click.echo(f"❌ Batch discovery failed: {e}")
+        click.echo(f"💡 This method should be CAPTCHA-friendly. If it fails, check your network connection.")
 
 
 @cli.command()
@@ -2401,6 +2320,190 @@ def reset_captcha_state():
         click.echo("💡 You can now resume discovery operations")
     else:
         click.echo("Cancelled")
+
+
+@cli.command()
+@click.option('--ultra-conservative', is_flag=True, help='Use ultra-conservative settings (1 item per request)')
+@click.option('--small-batches', is_flag=True, help='Use small batch sizes (5-10 items)')
+@click.option('--micro-batches', is_flag=True, help='Use micro batch sizes (1-3 items)')
+def set_conservative_mode(ultra_conservative, small_batches, micro_batches):
+    """Set conservative processing modes to avoid CAPTCHA triggers.
+    
+    These modes adjust batch sizes globally to reduce API load:
+    - Ultra-conservative: 1 item per request (slowest, safest)
+    - Small batches: 5-10 items per request (balanced)
+    - Micro batches: 1-3 items per request (very safe)
+    """
+    config = Config()
+    
+    if ultra_conservative:
+        batch_size = 1
+        mode_name = "ultra-conservative"
+    elif small_batches:
+        batch_size = 5
+        mode_name = "small batches"
+    elif micro_batches:
+        batch_size = 2
+        mode_name = "micro batches"
+    else:
+        click.echo("Please specify a conservative mode:")
+        click.echo("  --ultra-conservative: 1 item per request")
+        click.echo("  --small-batches: 5 items per request")
+        click.echo("  --micro-batches: 2 items per request")
+        return
+    
+    click.echo(f"🐌 Setting {mode_name} mode (batch size: {batch_size})")
+    click.echo(f"   This will be much slower but reduce CAPTCHA risk")
+    
+    # Store the setting in a config file for other commands to use
+    import json
+    from pathlib import Path
+    
+    config_file = Path("newsagger_conservative.json")
+    conservative_config = {
+        'mode': mode_name,
+        'batch_size': batch_size,
+        'set_at': str(datetime.now()),
+        'description': f'Conservative mode to avoid CAPTCHA triggers'
+    }
+    
+    config_file.write_text(json.dumps(conservative_config, indent=2))
+    
+    click.echo(f"✅ Conservative mode saved to {config_file}")
+    click.echo(f"💡 Other commands will now use batch size {batch_size} by default")
+    click.echo(f"   Remove {config_file} to return to normal batch sizes")
+
+
+@cli.command()
+def show_conservative_mode():
+    """Show current conservative mode settings."""
+    from pathlib import Path
+    import json
+    
+    config_file = Path("newsagger_conservative.json")
+    
+    if not config_file.exists():
+        click.echo("🟢 Normal mode: No conservative settings active")
+        click.echo("💡 Use 'set-conservative-mode' to activate CAPTCHA-safe processing")
+        return
+    
+    try:
+        conservative_config = json.loads(config_file.read_text())
+        click.echo(f"🐌 Conservative mode active: {conservative_config['mode']}")
+        click.echo(f"   Batch size: {conservative_config['batch_size']}")
+        click.echo(f"   Set at: {conservative_config['set_at']}")
+        click.echo(f"   Description: {conservative_config['description']}")
+        click.echo(f"\n💡 Remove {config_file} to return to normal processing")
+    except Exception as e:
+        click.echo(f"❌ Error reading conservative config: {e}")
+
+
+@cli.command()
+def pause_operations():
+    """Create a pause file to stop all long-running operations gracefully."""
+    from pathlib import Path
+    import json
+    
+    pause_file = Path("newsagger_pause.json")
+    pause_config = {
+        'paused_at': str(datetime.now()),
+        'reason': 'Manual pause requested',
+        'message': 'All operations paused via CLI command'
+    }
+    
+    pause_file.write_text(json.dumps(pause_config, indent=2))
+    
+    click.echo("⏸️  Operations paused!")
+    click.echo(f"   Pause file created: {pause_file}")
+    click.echo("   Long-running operations will stop at next checkpoint")
+    click.echo("💡 Use 'resume-operations' to continue")
+
+
+@cli.command()
+def resume_operations():
+    """Remove pause file to resume operations."""
+    from pathlib import Path
+    
+    pause_file = Path("newsagger_pause.json")
+    conservative_file = Path("newsagger_conservative.json")
+    
+    if pause_file.exists():
+        pause_file.unlink()
+        click.echo("▶️  Operations resumed!")
+        click.echo("   Pause file removed")
+    else:
+        click.echo("✅ Operations not paused")
+    
+    # Show conservative mode status
+    if conservative_file.exists():
+        click.echo("\n🐌 Conservative mode is still active")
+        click.echo("   Use 'show-conservative-mode' for details")
+
+
+@cli.command()
+@click.option('--facet-id', type=int, help='Split a specific facet by ID')
+@click.option('--facet-value', help='Split facets by value pattern (e.g., "1906")')
+def split_facet(facet_id, facet_value):
+    """Split large facets into smaller date ranges to avoid CAPTCHA.
+    
+    This is useful when a facet has too many items and keeps triggering CAPTCHAs.
+    """
+    config = Config()
+    storage = NewsStorage(**config.get_storage_config())
+    
+    if facet_id:
+        facets = [storage.get_search_facet(facet_id)]
+        if not facets[0]:
+            click.echo(f"❌ Facet {facet_id} not found")
+            return
+    elif facet_value:
+        facets = storage.get_search_facets()
+        facets = [f for f in facets if facet_value in f['facet_value']]
+        if not facets:
+            click.echo(f"❌ No facets found matching '{facet_value}'")
+            return
+    else:
+        click.echo("Please specify --facet-id or --facet-value")
+        return
+    
+    for facet in facets:
+        click.echo(f"\n📅 Splitting facet: {facet['facet_value']}")
+        click.echo(f"   Current status: {facet['status']}")
+        click.echo(f"   Items discovered: {facet.get('items_discovered', 0)}")
+        
+        # For date range facets, split into smaller periods
+        if facet['facet_type'] == 'date_range' and '/' in facet['facet_value']:
+            start_year, end_year = facet['facet_value'].split('/')
+            try:
+                start_year = int(start_year)
+                end_year = int(end_year)
+                
+                if end_year - start_year > 0:
+                    # Split into individual years
+                    click.echo(f"   Splitting {start_year}-{end_year} into individual years...")
+                    
+                    for year in range(start_year, end_year + 1):
+                        new_facet_id = storage.create_search_facet(
+                            'date_range', 
+                            f'{year}/{year}',
+                            f'Split from {facet["facet_value"]}',
+                            facet.get('estimated_items', 0) // (end_year - start_year + 1)
+                        )
+                        click.echo(f"   ✅ Created facet for {year} (ID: {new_facet_id})")
+                    
+                    # Mark original facet as split
+                    storage.update_facet_discovery(
+                        facet['id'], 
+                        status='split',
+                        error_message=f'Split into years {start_year}-{end_year}'
+                    )
+                    click.echo(f"   📋 Original facet marked as 'split'")
+                else:
+                    click.echo(f"   ⚠️  Facet is already a single year, cannot split further")
+            except ValueError:
+                click.echo(f"   ❌ Cannot parse year range: {facet['facet_value']}")
+        else:
+            click.echo(f"   ⚠️  Facet type '{facet['facet_type']}' not suitable for splitting")
 
 
 if __name__ == '__main__':

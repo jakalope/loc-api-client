@@ -237,6 +237,70 @@ class NewsDataProcessor:
         """Reset the deduplication cache."""
         self._seen_items.clear()
     
+    def process_page_details(self, page_details: Dict, page_url: str = '') -> Optional[PageInfo]:
+        """Process page details from direct page endpoint into PageInfo object."""
+        try:
+            # Extract information from the page details structure
+            sequence = page_details.get('sequence', 1)
+            
+            # Extract title info
+            title_info = page_details.get('title', {})
+            title = title_info.get('name', 'Unknown Title')
+            title_url = title_info.get('url', '')
+            
+            # Extract LCCN from title URL (format: https://chroniclingamerica.loc.gov/lccn/sn83045201.json)
+            lccn = ''
+            if title_url:
+                lccn_match = title_url.split('/lccn/')
+                if len(lccn_match) > 1:
+                    lccn = lccn_match[1].replace('.json', '')
+            
+            # Extract date from issue info
+            issue_info = page_details.get('issue', {})
+            date = issue_info.get('date_issued', '')
+            
+            # Extract edition from page URL or use default
+            edition = 1
+            if page_url:
+                parts = page_url.strip('/').split('/')
+                for part in parts:
+                    if part.startswith('ed-'):
+                        try:
+                            edition = int(part.split('-')[1])
+                            break
+                        except (IndexError, ValueError):
+                            pass
+            
+            # Create item_id from the page URL path
+            item_id = ''
+            if page_url:
+                # Extract path from full URL
+                if page_url.startswith('https://chroniclingamerica.loc.gov/'):
+                    item_id = page_url.replace('https://chroniclingamerica.loc.gov/', '').replace('.json', '')
+                else:
+                    item_id = page_url.replace('.json', '')
+            
+            # Create PageInfo object with all available URLs
+            page_info = PageInfo(
+                item_id=item_id,
+                lccn=lccn,
+                title=title,
+                date=date,
+                edition=edition,
+                sequence=sequence,
+                page_url=page_url.replace('.json', '') if page_url else '',
+                pdf_url=page_details.get('pdf', ''),
+                jp2_url=page_details.get('jp2', ''),
+                ocr_text=page_details.get('text', ''),  # OCR text URL
+                word_count=None  # Not available in page details
+            )
+            
+            return page_info
+            
+        except Exception as e:
+            self.logger.error(f"Failed to process page details: {e}")
+            return None
+    
     def filter_newspapers_by_criteria(self, newspapers: List[NewspaperInfo], 
                                     state: Optional[str] = None,
                                     language: Optional[str] = None,

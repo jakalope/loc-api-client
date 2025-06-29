@@ -154,10 +154,18 @@ class RateLimitedRequestManager:
         # Calculate minimum delay between requests (with safety buffer)
         self.min_request_delay = 60.0 / max_requests_per_minute
         
-        # Session for connection pooling
+        # Session for connection pooling with rotating user agents
         self.session = requests.Session()
+        self.user_agents = [
+            'Newsagger/0.1.0 (Educational Archive Tool - Rate Limited)',
+            'Newsagger/0.1.0 (Digital Humanities Research Tool)',
+            'Newsagger/0.1.0 (Historical Archive Client)',
+            'Newsagger/0.1.0 (Academic Research Tool)',
+            'Newsagger/0.1.0 (Library Science Tool)'
+        ]
+        self.current_user_agent_index = 0
         self.session.headers.update({
-            'User-Agent': 'Newsagger/0.1.0 (Educational Archive Tool - Rate Limited)'
+            'User-Agent': self.user_agents[0]
         })
         
         # Rate limiting state
@@ -217,12 +225,20 @@ class RateLimitedRequestManager:
                     time.sleep(wait_time)
                     current_time = time.time()
             
-            # Also ensure minimum delay between consecutive requests
+            # Also ensure minimum delay between consecutive requests with random jitter
             time_since_last = current_time - self.last_request_time
             if time_since_last < self.min_request_delay:
-                wait_time = self.min_request_delay - time_since_last
-                self.logger.debug(f"Minimum delay: waiting {wait_time:.1f}s")
+                # Add random jitter (±20%) to make requests less predictable
+                jitter_factor = random.uniform(0.8, 1.2)
+                wait_time = (self.min_request_delay - time_since_last) * jitter_factor
+                self.logger.debug(f"Minimum delay with jitter: waiting {wait_time:.1f}s")
                 time.sleep(wait_time)
+                current_time = time.time()
+            else:
+                # Even if we don't need to wait, add small random delay to vary patterns
+                small_jitter = random.uniform(0.1, 0.8)
+                self.logger.debug(f"Adding pattern variation: {small_jitter:.1f}s")
+                time.sleep(small_jitter)
                 current_time = time.time()
             
             # Record this request
@@ -468,6 +484,13 @@ class RateLimitedRequestManager:
                 # Wait for rate limit before making request
                 self._wait_for_rate_limit()
                 
+                # Rotate user agent occasionally to vary request patterns
+                if random.random() < 0.3:  # 30% chance to rotate
+                    self.current_user_agent_index = (self.current_user_agent_index + 1) % len(self.user_agents)
+                    self.session.headers.update({
+                        'User-Agent': self.user_agents[self.current_user_agent_index]
+                    })
+                
                 self.logger.debug(f"Making request to {endpoint} (attempt {attempt + 1})")
                 response = self.session.get(url, params=params, timeout=60)
                 
@@ -520,7 +543,7 @@ class RateLimitedRequestManager:
                 if attempt == self.max_retries - 1:
                     raise
                 # Exponential backoff for other errors (network issues, etc.)
-                wait_time = 30 * (2 ** attempt)  # 30s, 60s, 120s
+                wait_time = 5 * (attempt + 1) ** 2  # 5s, 20s, 45s
                 self.logger.info(f"Retrying in {wait_time}s...")
                 time.sleep(wait_time)
     
@@ -556,7 +579,7 @@ class LocApiClient:
         # Get the singleton rate limiter
         self.rate_limiter = RateLimitedRequestManager(
             base_url=base_url,
-            max_requests_per_minute=12,  # More conservative limit to avoid 429s
+            max_requests_per_minute=12,  # Conservative limit to avoid CAPTCHA protection
             max_retries=max_retries
         )
         self.logger = logging.getLogger(__name__)
@@ -678,6 +701,44 @@ class LocApiClient:
                 'date_range': f"{start_year}-{end_year}",
                 'error': str(e)
             }
+    
+    def get_batches(self, page: int = 1, rows: int = 100) -> Dict:
+        """
+        Get digitization batches (server-friendly alternative to search API).
+        
+        Batches represent groups of digitized newspaper pages and are designed
+        for bulk access without triggering CAPTCHA protection.
+        """
+        params = {
+            'format': 'json',
+            'page': page,
+            'rows': min(rows, 1000)  # Respect API limits
+        }
+        return self._make_request('batches.json', params)
+    
+    def get_all_batches(self) -> Generator[Dict, None, None]:
+        """Generator to fetch all batches with pagination."""
+        page = 1
+        while True:
+            try:
+                data = self.get_batches(page=page)
+                batches = data.get('batches', [])
+                
+                if not batches:
+                    break
+                    
+                for batch in batches:
+                    yield batch
+                    
+                page += 1
+                
+                # Check if we've reached the end
+                if page > data.get('totalPages', 1):
+                    break
+                    
+            except Exception as e:
+                self.logger.error(f"Error fetching batches page {page}: {e}")
+                break
     
     def get_request_stats(self) -> Dict:
         """Get rate limiting statistics."""

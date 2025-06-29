@@ -1128,3 +1128,146 @@ class DiscoveryManager:
         except Exception as e:
             self.logger.debug(f"Could not parse retry time from message: {error_message} - {e}")
             return 0  # Assume ready to retry if parsing fails
+    
+    def discover_content_via_batches(self, max_batches: int = None, auto_enqueue: bool = False,
+                                   batch_size: int = 100, rate_limit_delay: float = 3.0,
+                                   progress_callback=None) -> Dict:
+        """
+        Discover content via digitization batches instead of search API.
+        
+        This method uses the batches.json endpoint which is designed for bulk access
+        and should be much less likely to trigger CAPTCHA protection.
+        
+        Args:
+            max_batches: Maximum number of batches to process (None for all)
+            auto_enqueue: Whether to automatically add discovered pages to download queue
+            batch_size: Pages to process per batch (not used for batches endpoint)
+            rate_limit_delay: Delay between batch requests
+            progress_callback: Optional callback for progress updates
+        
+        Returns:
+            Dict with discovery statistics
+        """
+        self.logger.info("Starting batch-based content discovery...")
+        
+        discovered_pages = 0
+        enqueued_pages = 0
+        processed_batches = 0
+        errors = 0
+        
+        try:
+            # Get batches using the new API method
+            for batch in self.api_client.get_all_batches():
+                if max_batches and processed_batches >= max_batches:
+                    break
+                
+                try:
+                    # Extract batch information
+                    batch_name = batch.get('name', 'unknown')
+                    batch_url = batch.get('url', '')
+                    
+                    self.logger.info(f"Processing batch {processed_batches + 1}: {batch_name}")
+                    
+                    # Get detailed batch information to find pages
+                    if batch_url:
+                        # Convert batch URL to JSON format if needed
+                        if not batch_url.endswith('.json'):
+                            batch_url = batch_url.rstrip('/') + '.json'
+                        
+                        # Extract endpoint from full URL
+                        if batch_url.startswith('https://chroniclingamerica.loc.gov/'):
+                            endpoint = batch_url.replace('https://chroniclingamerica.loc.gov/', '')
+                        else:
+                            endpoint = batch_url
+                        
+                        batch_details = self.api_client._make_request(endpoint)
+                        
+                        # Process issues from this batch (batches contain issues, not pages directly)
+                        batch_issues = batch_details.get('issues', [])
+                        
+                        for issue_data in batch_issues:
+                            # Each issue has its own URL - we need to fetch it to get pages
+                            issue_url = issue_data.get('url', '')
+                            if issue_url:
+                                try:
+                                    # Convert issue URL to endpoint
+                                    if issue_url.startswith('https://chroniclingamerica.loc.gov/'):
+                                        issue_endpoint = issue_url.replace('https://chroniclingamerica.loc.gov/', '')
+                                    else:
+                                        issue_endpoint = issue_url
+                                    
+                                    # Get issue details which contain the actual pages
+                                    issue_details = self.api_client._make_request(issue_endpoint)
+                                    issue_pages = issue_details.get('pages', [])
+                                    
+                                    for page_data in issue_pages:
+                                        # Each page_data has 'url' and 'sequence' - we need full page details
+                                        page_url = page_data.get('url', '')
+                                        if page_url:
+                                            try:
+                                                # Convert page URL to endpoint
+                                                if page_url.startswith('https://chroniclingamerica.loc.gov/'):
+                                                    page_endpoint = page_url.replace('https://chroniclingamerica.loc.gov/', '')
+                                                else:
+                                                    page_endpoint = page_url
+                                                
+                                                # Get full page details (add brief delay for rate limiting)
+                                                page_details = self.api_client._make_request(page_endpoint)
+                                                
+                                                # Small delay between page requests to be respectful
+                                                import time
+                                                time.sleep(0.1)  # 100ms delay between individual pages
+                                                
+                                                # Convert page details to our page format
+                                                page = self.processor.process_page_details(page_details, page_url)
+                                                if page:
+                                                    discovered_pages += 1
+                                                    
+                                                    # Auto-enqueue if requested
+                                                    if auto_enqueue:
+                                                        queue_result = self.storage.add_to_download_queue(
+                                                            queue_type='page',
+                                                            reference_id=page.item_id,
+                                                            priority=2  # Medium priority for batch-discovered content
+                                                        )
+                                                        if queue_result:
+                                                            enqueued_pages += 1
+                                            except Exception as e:
+                                                self.logger.error(f"Error processing page {page_url}: {e}")
+                                                continue
+                                except Exception as e:
+                                    self.logger.error(f"Error processing issue {issue_url}: {e}")
+                                    continue
+                    
+                    processed_batches += 1
+                    
+                    # Progress callback
+                    if progress_callback:
+                        progress_callback(processed_batches, discovered_pages, enqueued_pages)
+                    
+                    # Rate limiting delay
+                    if rate_limit_delay and processed_batches > 0:
+                        import time
+                        time.sleep(rate_limit_delay)
+                        
+                except Exception as e:
+                    self.logger.error(f"Error processing batch {batch_name}: {e}")
+                    errors += 1
+                    continue
+        
+        except Exception as e:
+            self.logger.error(f"Error in batch discovery: {e}")
+            errors += 1
+        
+        stats = {
+            'processed_batches': processed_batches,
+            'discovered_pages': discovered_pages,
+            'enqueued_pages': enqueued_pages,
+            'errors': errors,
+            'method': 'batch_discovery'
+        }
+        
+        self.logger.info(f"Batch discovery complete: {processed_batches} batches, "
+                        f"{discovered_pages} pages discovered, {enqueued_pages} enqueued")
+        
+        return stats

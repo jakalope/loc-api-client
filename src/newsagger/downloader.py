@@ -175,12 +175,7 @@ class DownloadProcessor:
     def _download_page(self, item_id: str) -> Dict:
         """Download a specific newspaper page."""
         # Get page metadata from storage
-        pages = self.storage.get_pages()
-        page_data = None
-        for page in pages:
-            if page['item_id'] == item_id:
-                page_data = page
-                break
+        page_data = self.storage.get_page_by_item_id(item_id)
         
         if not page_data:
             return {
@@ -370,8 +365,7 @@ class DownloadProcessor:
         Returns the number of bytes downloaded.
         Raises exceptions on failure (to be caught by retry decorator).
         """
-        # Use the same rate limiting as the API client
-        time.sleep(self.api_client.request_delay)
+        # Rate limiting is handled centrally by the API client
         
         # Download with streaming to handle large files
         response = self.session.get(url, stream=True, timeout=120)

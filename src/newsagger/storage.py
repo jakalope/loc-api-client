@@ -324,6 +324,14 @@ class NewsStorage(DatabaseOperationMixin):
             conn.execute("UPDATE pages SET downloaded = TRUE WHERE item_id = ?", (item_id,))
             conn.commit()
     
+    def get_page_by_item_id(self, item_id: str) -> Dict:
+        """Get a single page by item_id."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM pages WHERE item_id = ?", (item_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    
     def create_download_session(self, session_name: str, query_params: Dict, 
                               total_expected: int) -> int:
         """Create a new download session."""
