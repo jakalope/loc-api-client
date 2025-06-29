@@ -233,6 +233,8 @@ class ProgressMonitor:
         self._last_stats = ProgressStats()
         self._total_batches_cache = None
         self._cache_time = None
+        self._downloads_size_cache = None
+        self._downloads_size_cache_time = None
     
     def get_progress_stats(self) -> ProgressStats:
         """Get current progress statistics using simple database queries."""
@@ -333,30 +335,31 @@ class ProgressMonitor:
                     stats.rate_limit_reason = "High queue backlog (possible rate limiting)"
                     stats.cooldown_remaining_minutes = 0  # Unknown without session tracking
             
-            # Get actual download size from database
+            # Get actual download size by scanning downloads directory
             try:
-                conn = sqlite3.connect(self.db_path)
-                cursor = conn.cursor()
-                
-                # Sum actual downloaded sizes from database
-                cursor.execute("""
-                    SELECT SUM(estimated_size_mb) 
-                    FROM download_queue 
-                    WHERE status = 'completed'
-                """)
-                result = cursor.fetchone()
-                if result and result[0] and result[0] > 0:
-                    stats.download_size_mb = result[0]
-                else:
-                    # Database has no size data, estimate based on completed items
-                    # Use 0.5 MB per page as reasonable average (PDF + JP2 + OCR + metadata)
-                    estimated_size_mb = stats.items_downloaded * 0.5
-                    stats.download_size_mb = estimated_size_mb
-                
-                conn.close()
+                stats.download_size_mb = self._calculate_downloads_directory_size()
             except Exception as e:
-                # If query fails, estimate based on completed items
-                stats.download_size_mb = stats.items_downloaded * 0.5
+                # If directory scan fails, fall back to database estimate
+                try:
+                    conn = sqlite3.connect(self.db_path)
+                    cursor = conn.cursor()
+                    
+                    cursor.execute("""
+                        SELECT SUM(estimated_size_mb) 
+                        FROM download_queue 
+                        WHERE status = 'completed'
+                    """)
+                    result = cursor.fetchone()
+                    if result and result[0] and result[0] > 0:
+                        stats.download_size_mb = result[0]
+                    else:
+                        # Last resort: estimate based on completed items
+                        stats.download_size_mb = stats.items_downloaded * 0.5
+                    
+                    conn.close()
+                except:
+                    # Final fallback
+                    stats.download_size_mb = stats.items_downloaded * 0.5
             
         except Exception as e:
             # Return last known stats if database query fails
@@ -367,6 +370,46 @@ class ProgressMonitor:
         
         self._last_stats = stats
         return stats
+    
+    def _calculate_downloads_directory_size(self) -> float:
+        """Calculate total size of downloads directory in MB with caching."""
+        now = datetime.now()
+        
+        # Cache for 30 seconds to avoid expensive directory scans on every update
+        if (self._downloads_size_cache is not None and 
+            self._downloads_size_cache_time is not None and
+            (now - self._downloads_size_cache_time).total_seconds() < 30):
+            return self._downloads_size_cache
+        
+        if not self.downloads_dir or not Path(self.downloads_dir).exists():
+            self._downloads_size_cache = 0.0
+            self._downloads_size_cache_time = now
+            return 0.0
+        
+        total_size_bytes = 0
+        downloads_path = Path(self.downloads_dir)
+        
+        try:
+            # Walk through all files in downloads directory
+            for file_path in downloads_path.rglob('*'):
+                if file_path.is_file():
+                    try:
+                        total_size_bytes += file_path.stat().st_size
+                    except (OSError, PermissionError):
+                        # Skip files we can't read
+                        continue
+        except Exception:
+            # If directory traversal fails, return cached value or 0
+            if self._downloads_size_cache is not None:
+                return self._downloads_size_cache
+            return 0.0
+        
+        # Convert bytes to MB and cache the result
+        total_size_mb = total_size_bytes / (1024 * 1024)
+        self._downloads_size_cache = total_size_mb
+        self._downloads_size_cache_time = now
+        
+        return total_size_mb
     
     def _calculate_batch_progress(self, session_info: Dict) -> float:
         """Calculate progress within current batch."""

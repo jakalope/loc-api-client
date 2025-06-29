@@ -34,6 +34,45 @@ The **LoC Chronicling America Client** provides automated workflows for large-sc
 - **Interactive CLI** - Modular command-line interface with grouped commands
 - **Memory efficiency** - Batch processing for handling large newspaper collections
 
+## 🖥️ TUI Monitor - Real-Time Operations Dashboard
+
+The **TUI Monitor** (`tui_monitor.py`) provides a comprehensive, real-time dashboard for monitoring and managing automated batch discovery and download processes.
+
+### Key Features
+- **🔄 Automated Process Management** - Automatically starts and manages batch discovery and download processes
+- **📊 Live Progress Tracking** - Real-time updates for discovery progress, download completion, and queue status
+- **⏱️ Intelligent Estimates** - Calculates realistic completion times based on current processing rates
+- **🔧 Process Health Monitoring** - Tracks PIDs, uptime, restart counts, and error status
+- **📈 Real-Time Statistics** - Live updates of discovered items, downloaded content, and total data size
+- **🎯 Clean Interface** - Organized panels for Discovery, Downloads, Processes, Statistics, and Estimates
+
+### Usage
+```bash
+# Launch TUI monitor with default paths
+python tui_monitor.py
+
+# Launch with custom database and download paths
+python tui_monitor.py --db-path /custom/path/newsagger.db --downloads-dir /custom/downloads
+
+# Exit anytime with Ctrl+C (gracefully stops all processes)
+```
+
+The TUI monitor automatically:
+1. **Starts batch discovery** - Runs `discover-via-batches --auto-enqueue` in the background
+2. **Starts download processor** - Runs `process-downloads --continuous` to handle the queue
+3. **Monitors progress** - Updates every second with fresh database statistics
+4. **Handles failures** - Automatically restarts failed processes with exponential backoff
+5. **Provides ETAs** - Calculates realistic completion times based on current processing rates
+
+### Display Panels
+- **Discovery** - Batch progress (5/25), current batch status, and processing rate
+- **Downloads** - Queue status, completion progress, and download rate  
+- **Processes** - PID tracking, uptime, restart counts, and process health
+- **Statistics** - Total batches, discovered items, queue size, downloaded count, and total data size
+- **Estimates** - Realistic ETAs for discovery completion and download completion
+
+**Perfect for long-running operations** - The TUI monitor is designed for multi-hour batch discovery and download operations, providing confidence that processes are running correctly and giving accurate progress updates.
+
 ## Quick Start
 
 ### 1. Setup Environment
@@ -46,7 +85,23 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Basic Discovery & Download
+### 2. Launch TUI Monitor (Recommended)
+```bash
+# Launch the comprehensive TUI monitor for automated operations
+python tui_monitor.py
+
+# Optional: specify custom paths
+python tui_monitor.py --db-path /path/to/db --downloads-dir /path/to/downloads
+```
+
+The **TUI Monitor** provides real-time monitoring with:
+- ✅ **Live progress tracking** for discovery and downloads
+- ✅ **Process management** - automatically starts and manages background processes
+- ✅ **Real-time statistics** - queue status, completion rates, and ETAs
+- ✅ **Error monitoring** - process health and restart tracking
+- ✅ **Estimate calculations** - completion time estimates for long-running operations
+
+### 3. Alternative: Manual Command-Line Workflow
 ```bash
 # Complete automated workflow for California newspapers (1906)
 python main.py setup-download-workflow \
@@ -57,17 +112,10 @@ python main.py setup-download-workflow \
 
 # Process the download queue
 python main.py process-downloads --max-items 10
-```
 
-### 3. Monitor Progress
-```bash
-# Check overall system status
+# Monitor progress manually
 python main.py discovery-status
-
-# View download queue
 python main.py show-queue --limit 10
-
-# Check download statistics
 python main.py download-stats
 ```
 
@@ -226,7 +274,9 @@ newsagger/
 ├── tests/                 # Comprehensive test suite
 ├── downloads/             # Downloaded content (auto-created)
 ├── data/                  # Database storage (auto-created)
-└── main.py               # CLI entry point
+├── logs/                  # Process logs (auto-created)
+├── main.py               # CLI entry point
+└── tui_monitor.py        # Real-time TUI dashboard (RECOMMENDED)
 ```
 
 ## API Compliance
