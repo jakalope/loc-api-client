@@ -184,10 +184,25 @@ class TestBatchMapper:
         mock_conn.__enter__ = Mock(return_value=mock_conn)
         mock_conn.__exit__ = Mock(return_value=None)
         
-        # Mock database results
+        # Mock database results - use simple dict-like objects instead of Mocks
+        class MockRow:
+            def __init__(self, **kwargs):
+                self._data = kwargs
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+            
+            def keys(self):
+                return self._data.keys()
+            
+            def __getitem__(self, key):
+                return self._data[key]
+            
+            def __iter__(self):
+                return iter(self._data.items())
+        
         mock_cursor.fetchall.return_value = [
-            Mock(item_id='page1', page_url='/lccn/sn12345678/1900-01-01/ed-1/seq-1/', downloaded=True, created_at='2023-01-01'),
-            Mock(item_id='page2', page_url='/lccn/sn12345678/1900-01-01/ed-1/seq-2/', downloaded=False, created_at='2023-01-01')
+            MockRow(item_id='page1', page_url='/lccn/sn12345678/1900-01-01/ed-1/seq-1/', downloaded=True, created_at='2023-01-01'),
+            MockRow(item_id='page2', page_url='/lccn/sn12345678/1900-01-01/ed-1/seq-2/', downloaded=False, created_at='2023-01-01')
         ]
         
         mapper = BatchMapper(mock_storage, mock_client)
@@ -216,7 +231,7 @@ class TestBatchMapper:
         assert result['is_discovery_complete'] is False
         assert result['lccns'] == {'sn12345678'}
     
-    @patch('pathlib.Path')
+    @patch('newsagger.batch_utils.Path')
     def test_get_batch_download_status(self, mock_path_class):
         """Test getting batch download status with filesystem check."""
         mock_storage = Mock(spec=NewsStorage)
@@ -258,10 +273,14 @@ class TestBatchMapper:
         mock_file2.stat.return_value.st_size = 2 * 1024 * 1024  # 2MB
         mock_lccn_dir2.rglob.return_value = [mock_file2]  # 1 file
         
-        mock_downloads_path.__truediv__.side_effect = lambda lccn: {
-            'sn12345678': mock_lccn_dir1,
-            'sn87654321': mock_lccn_dir2
-        }[lccn]
+        # Configure Path division operator properly
+        def mock_truediv(lccn):
+            return {
+                'sn12345678': mock_lccn_dir1,
+                'sn87654321': mock_lccn_dir2
+            }[lccn]
+        
+        mock_downloads_path.__truediv__ = Mock(side_effect=mock_truediv)
         
         result = mapper.get_batch_download_status('test_batch', '/test/downloads')
         
@@ -297,10 +316,25 @@ class TestBatchSessionTracker:
         mock_conn.__enter__ = Mock(return_value=mock_conn)
         mock_conn.__exit__ = Mock(return_value=None)
         
-        # Mock active sessions
+        # Mock active sessions - use MockRow class
+        class MockRow:
+            def __init__(self, **kwargs):
+                self._data = kwargs
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+            
+            def keys(self):
+                return self._data.keys()
+            
+            def __getitem__(self, key):
+                return self._data[key]
+            
+            def __iter__(self):
+                return iter(self._data.items())
+        
         mock_cursor.fetchall.return_value = [
-            Mock(session_name='session1', status='active', current_batch_name='batch1'),
-            Mock(session_name='session2', status='captcha_blocked', current_batch_name='batch2')
+            MockRow(session_name='session1', status='active', current_batch_name='batch1'),
+            MockRow(session_name='session2', status='captcha_blocked', current_batch_name='batch2')
         ]
         
         tracker = BatchSessionTracker(mock_storage)
@@ -326,25 +360,28 @@ class TestBatchSessionTracker:
         mock_conn.cursor.return_value = mock_cursor
         mock_conn.close.return_value = None
         
-        # Mock session data
-        session_row = Mock()
-        session_row.session_name = 'test_session'
-        session_row.started_at = '2023-01-01T10:00:00'
-        session_row.updated_at = '2023-01-01T11:00:00'
-        session_row.total_pages_discovered = 1000
+        # Mock session data - use MockRow class
+        class MockRow:
+            def __init__(self, **kwargs):
+                self._data = kwargs
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+            
+            def keys(self):
+                return self._data.keys()
+            
+            def __getitem__(self, key):
+                return self._data[key]
+            
+            def __iter__(self):
+                return iter(self._data.items())
         
-        # Convert to dict-like object
-        def dict_conversion():
-            return {
-                'session_name': 'test_session',
-                'started_at': '2023-01-01T10:00:00',
-                'updated_at': '2023-01-01T11:00:00',
-                'total_pages_discovered': 1000
-            }
-        
-        session_row.__iter__ = lambda self: iter(dict_conversion().items())
-        session_row.keys = lambda self: dict_conversion().keys()
-        session_row.__getitem__ = lambda self, key: dict_conversion()[key]
+        session_row = MockRow(
+            session_name='test_session',
+            started_at='2023-01-01T10:00:00',
+            updated_at='2023-01-01T11:00:00',
+            total_pages_discovered=1000
+        )
         
         mock_cursor.fetchone.return_value = session_row
         

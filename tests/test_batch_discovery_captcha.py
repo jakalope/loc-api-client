@@ -121,6 +121,7 @@ class TestBatchDiscoveryCaptchaHandling:
         mock_storage.get_batch_discovery_session.return_value = None
         mock_storage.create_batch_discovery_session.return_value = None
         mock_storage.update_batch_discovery_session.return_value = None
+        mock_storage.count_issue_pages.return_value = 0  # No existing pages
         
         # Override the cooling-off wait time to 1 second
         with patch('newsagger.batch_discovery.time.sleep') as mock_sleep, \
@@ -225,6 +226,7 @@ class TestBatchDiscoveryCaptchaHandling:
         mock_processor.process_page_from_issue.side_effect = mock_process_page
         mock_storage.store_pages.side_effect = lambda pages: len(pages)
         mock_storage.get_batch_discovery_session.return_value = None
+        mock_storage.count_issue_pages.return_value = 0  # No existing pages
         
         # Process batch
         discovery._process_single_batch(batch_data, 0, "test", 0, 0, False, Mock())

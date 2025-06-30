@@ -49,7 +49,7 @@ class TestCLI:
         }
         mock_processor.return_value = mock_processor_instance
         
-        result = self.runner.invoke(cli, ['list-newspapers'])
+        result = self.runner.invoke(cli, ['newspaper', 'list-newspapers'])
         
         assert result.exit_code == 0
         assert "Found 1 newspapers" in result.output
@@ -588,7 +588,7 @@ class TestCLI:
         with patch('newsagger.cli.Config') as mock_config:
             mock_config.side_effect = Exception("Config error")
             
-            result = self.runner.invoke(cli, ['list-newspapers'])
+            result = self.runner.invoke(cli, ['newspaper', 'list-newspapers'])
             
             # Should not crash, but may have non-zero exit code
             assert "Config error" in result.output or result.exit_code != 0
