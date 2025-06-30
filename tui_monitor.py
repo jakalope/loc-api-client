@@ -145,8 +145,8 @@ class BackgroundProcessManager:
             env = os.environ.copy()
             env["PYTHONPATH"] = str(Path(__file__).parent / "src")
             
-            # Change to parent directory that contains the correct database
-            working_dir = Path("/home/jake/loc")
+            # Use current working directory
+            working_dir = Path.cwd()
             
             process_status.process = subprocess.Popen(
                 process_status.command,
@@ -251,37 +251,53 @@ class ProgressMonitor:
         self._cache_time = None
         self._downloads_size_cache = None
         self._downloads_size_cache_time = None
+        self._stats_cache = None
+        self._stats_cache_time = None
     
     def get_progress_stats(self) -> ProgressStats:
-        """Get current progress statistics using simple database queries."""
+        """Get current progress statistics using simple database queries with timeout protection."""
         if not self.storage or not Path(self.db_path).exists():
             return ProgressStats()
+        
+        # Use cache to reduce database hits on slow storage (5 second cache)
+        from datetime import datetime as dt
+        now = dt.now()
+        if (self._stats_cache is not None and 
+            self._stats_cache_time is not None and
+            (now - self._stats_cache_time).total_seconds() < 5):
+            return self._stats_cache
         
         stats = ProgressStats()
         
         try:
+            # Set shorter timeout for slow storage
+            timeout = 1.0  # 1 second timeout for slow drives
             # Use basic database queries instead of complex batch tracking
             stats.total_batches = 25  # Known estimate from previous analysis
             
-            # Get download queue statistics - use working storage methods as backup
+            # Get download queue statistics with timeout protection
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = sqlite3.connect(self.db_path, timeout=timeout)
                 cursor = conn.cursor()
                 
-                # Count items by status directly from database
-                cursor.execute("SELECT COUNT(*) FROM download_queue WHERE status = 'completed'")
-                stats.items_downloaded = cursor.fetchone()[0]
+                # Use a single optimized query instead of multiple queries
+                cursor.execute("""
+                    SELECT 
+                        SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as completed,
+                        SUM(CASE WHEN status = 'queued' THEN 1 ELSE 0 END) as queued,
+                        SUM(CASE WHEN status = 'in_progress' THEN 1 ELSE 0 END) as in_progress,
+                        SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as active,
+                        COUNT(*) as total
+                    FROM download_queue
+                """)
                 
-                cursor.execute("SELECT COUNT(*) FROM download_queue WHERE status = 'queued'")
-                queued_count = cursor.fetchone()[0]
-                
-                cursor.execute("SELECT COUNT(*) FROM download_queue WHERE status = 'in_progress'")
-                in_progress_count = cursor.fetchone()[0]
-                
-                cursor.execute("SELECT COUNT(*) FROM download_queue WHERE status = 'active'")
-                active_count = cursor.fetchone()[0]
-                
-                stats.total_queue_items = queued_count + stats.items_downloaded + in_progress_count + active_count
+                result = cursor.fetchone()
+                if result:
+                    stats.items_downloaded = result[0] or 0
+                    queued_count = result[1] or 0
+                    in_progress_count = result[2] or 0
+                    active_count = result[3] or 0
+                    stats.total_queue_items = result[4] or 0
                 
                 conn.close()
             except Exception as e:
@@ -298,22 +314,12 @@ class ProgressMonitor:
                     stats.total_queue_items = 0
                     stats.items_downloaded = 0
             
-            # Get actual batch discovery count from database
-            # Check how many unique batch names we have in batch_discovery_sessions
+            # Get batch discovery data with timeout protection
             try:
-                conn = sqlite3.connect(self.db_path)
+                conn = sqlite3.connect(self.db_path, timeout=timeout)
                 cursor = conn.cursor()
                 
-                # Count unique batches that have been discovered
-                cursor.execute("""
-                    SELECT COUNT(DISTINCT current_batch_name) 
-                    FROM batch_discovery_sessions 
-                    WHERE current_batch_name IS NOT NULL
-                """)
-                result = cursor.fetchone()
-                batch_count = result[0] if result else 0
-                
-                # Get real-time discovery session data
+                # Single optimized query for all batch session data
                 cursor.execute("""
                     SELECT 
                         current_batch_name,
@@ -345,9 +351,9 @@ class ProgressMonitor:
                     
                     # Calculate discovery rates from recent activity
                     if session[7]:  # last_update timestamp
-                        from datetime import datetime, timedelta
-                        last_update = datetime.strptime(session[7], '%Y-%m-%d %H:%M:%S')
-                        time_since_update = (datetime.now() - last_update).total_seconds()
+                        from datetime import datetime as dt2, timedelta
+                        last_update = dt2.strptime(session[7], '%Y-%m-%d %H:%M:%S')
+                        time_since_update = (dt2.now() - last_update).total_seconds()
                         
                         # Estimate rate based on recent activity and issue processing speed
                         # If the session was updated recently, discovery is active
@@ -386,31 +392,27 @@ class ProgressMonitor:
                     stats.rate_limit_reason = "High queue backlog (possible rate limiting)"
                     stats.cooldown_remaining_minutes = 0  # Unknown without session tracking
             
-            # Get actual download size by scanning downloads directory
+            # Skip expensive directory scanning on slow storage, use database estimate
             try:
-                stats.download_size_mb = self._calculate_downloads_directory_size()
-            except Exception as e:
-                # If directory scan fails, fall back to database estimate
-                try:
-                    conn = sqlite3.connect(self.db_path)
-                    cursor = conn.cursor()
-                    
-                    cursor.execute("""
-                        SELECT SUM(estimated_size_mb) 
-                        FROM download_queue 
-                        WHERE status = 'completed'
-                    """)
-                    result = cursor.fetchone()
-                    if result and result[0] and result[0] > 0:
-                        stats.download_size_mb = result[0]
-                    else:
-                        # Last resort: estimate based on completed items
-                        stats.download_size_mb = stats.items_downloaded * 0.5
-                    
-                    conn.close()
-                except:
-                    # Final fallback
+                conn = sqlite3.connect(self.db_path, timeout=timeout)
+                cursor = conn.cursor()
+                
+                cursor.execute("""
+                    SELECT SUM(estimated_size_mb) 
+                    FROM download_queue 
+                    WHERE status = 'completed'
+                """)
+                result = cursor.fetchone()
+                if result and result[0] and result[0] > 0:
+                    stats.download_size_mb = result[0]
+                else:
+                    # Estimate based on completed items (average 0.5MB per item)
                     stats.download_size_mb = stats.items_downloaded * 0.5
+                
+                conn.close()
+            except:
+                # Final fallback
+                stats.download_size_mb = stats.items_downloaded * 0.5
             
         except Exception as e:
             # Return last known stats if database query fails
@@ -422,6 +424,9 @@ class ProgressMonitor:
         # Collect rate limiting data
         self._collect_rate_limiting_data(stats)
         
+        # Cache the results
+        self._stats_cache = stats
+        self._stats_cache_time = now
         self._last_stats = stats
         return stats
     
@@ -590,8 +595,8 @@ class ProgressMonitor:
 class TUIMonitor:
     """Rich TUI for monitoring batch discovery and downloads."""
     
-    def __init__(self, db_path: str = "/home/jake/loc/data/newsagger.db", 
-                 downloads_dir: str = "/home/jake/loc/downloads"):
+    def __init__(self, db_path: str = "data/newsagger.db", 
+                 downloads_dir: str = "downloads"):
         self.db_path = db_path
         self.downloads_dir = downloads_dir
         
@@ -1017,19 +1022,27 @@ class TUIMonitor:
         self.console.print("[bold green]Starting LoC Archive Monitor...[/bold green]")
         
         # Start background processes
+        self.console.print("[dim]Starting background processes...[/dim]")
         self.process_manager.start_all()
         
         # Give processes time to start
+        self.console.print("[dim]Waiting for processes to start...[/dim]")
         time.sleep(2)
         
+        self.console.print("[dim]Initializing TUI display...[/dim]")
         with Live(console=self.console, refresh_per_second=2, screen=True) as live:
             while not self.shutdown_requested:
                 try:
                     # Monitor processes
                     processes = self.process_manager.monitor_processes()
                     
-                    # Get progress stats
-                    stats = self.progress_monitor.get_progress_stats()
+                    # Get progress stats with timeout protection
+                    try:
+                        stats = self.progress_monitor.get_progress_stats()
+                    except Exception as e:
+                        # Use default stats if database is slow
+                        stats = ProgressStats()
+                        stats.rate_limit_reason = f"Database timeout: {str(e)[:50]}"
                     
                     # Update display
                     layout = self.create_layout(stats, processes)
@@ -1058,13 +1071,13 @@ def main():
     parser.add_argument(
         '--db-path',
         type=str,
-        default="/home/jake/loc/data/newsagger.db",
+        default="data/newsagger.db",
         help='Path to database file'
     )
     parser.add_argument(
         '--downloads-dir', 
         type=str,
-        default="/home/jake/loc/downloads",
+        default="downloads",
         help='Path to downloads directory'
     )
     
