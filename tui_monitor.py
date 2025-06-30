@@ -144,6 +144,8 @@ class BackgroundProcessManager:
             # Set up environment to ensure correct paths
             env = os.environ.copy()
             env["PYTHONPATH"] = str(Path(__file__).parent / "src")
+            env["DATABASE_PATH"] = self.db_path
+            env["DOWNLOAD_DIR"] = self.downloads_dir
             
             # Use current working directory
             working_dir = Path.cwd()
@@ -392,7 +394,7 @@ class ProgressMonitor:
                     stats.rate_limit_reason = "High queue backlog (possible rate limiting)"
                     stats.cooldown_remaining_minutes = 0  # Unknown without session tracking
             
-            # Skip expensive directory scanning on slow storage, use database estimate
+            # Check database estimates first, fall back to directory scan if needed
             try:
                 conn = sqlite3.connect(self.db_path, timeout=timeout)
                 cursor = conn.cursor()
@@ -403,16 +405,23 @@ class ProgressMonitor:
                     WHERE status = 'completed'
                 """)
                 result = cursor.fetchone()
-                if result and result[0] and result[0] > 0:
-                    stats.download_size_mb = result[0]
-                else:
-                    # Estimate based on completed items (average 0.5MB per item)
-                    stats.download_size_mb = stats.items_downloaded * 0.5
+                db_estimate = result[0] if result and result[0] else 0
                 
                 conn.close()
+                
+                # If database estimate is missing/zero, calculate from directory
+                if db_estimate <= 0:
+                    stats.download_size_mb = self._calculate_downloads_directory_size()
+                else:
+                    stats.download_size_mb = db_estimate
+                    
             except:
-                # Final fallback
-                stats.download_size_mb = stats.items_downloaded * 0.5
+                # Final fallback - try directory scan, then estimate
+                try:
+                    stats.download_size_mb = self._calculate_downloads_directory_size()
+                except:
+                    # Last resort estimate
+                    stats.download_size_mb = stats.items_downloaded * 3.0  # ~3MB average per item
             
         except Exception as e:
             # Return last known stats if database query fails
