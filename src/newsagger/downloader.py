@@ -25,10 +25,16 @@ class DownloadProcessor:
     """Processes download queue and manages file downloads."""
     
     def __init__(self, storage: NewsStorage, api_client: LocApiClient, 
-                 download_dir: str = "./downloads", 
+                 download_dir: str = None, 
                  file_types: List[str] = None):
         self.storage = storage
         self.api_client = api_client
+        
+        # Use config default if download_dir not specified
+        if download_dir is None:
+            from .config import Config
+            download_dir = Config().download_dir
+        
         self.download_dir = Path(download_dir)
         self.download_dir.mkdir(parents=True, exist_ok=True)
         self.logger = logging.getLogger(__name__)

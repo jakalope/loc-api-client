@@ -1890,7 +1890,7 @@ def show_queue(status, limit):
 @cli.command()
 @click.option('--max-items', default=None, type=int, help='Maximum items to download (per batch if continuous)')
 @click.option('--max-size-mb', default=None, type=float, help='Maximum total download size in MB')
-@click.option('--download-dir', default='./downloads', help='Directory to store downloaded files')
+@click.option('--download-dir', default=None, help='Directory to store downloaded files (default: ./data/downloads)')
 @click.option('--file-types', default='pdf,jp2,ocr,metadata', help='Comma-separated file types to download (pdf,jp2,ocr,metadata)')
 @click.option('--dry-run', is_flag=True, help='Show what would be downloaded without actually doing it')
 @click.option('--continuous', is_flag=True, help='Continuously process new items as they become available')
@@ -1900,6 +1900,9 @@ def process_downloads(max_items, max_size_mb, download_dir, file_types, dry_run,
     config = Config()
     storage = NewsStorage(**config.get_storage_config())
     client = LocApiClient(**config.get_api_config())
+    
+    # Use config default if not specified
+    download_dir = download_dir or config.download_dir
     
     # Parse file types
     file_types_list = [ft.strip().lower() for ft in file_types.split(',')]
@@ -1966,7 +1969,7 @@ def process_downloads(max_items, max_size_mb, download_dir, file_types, dry_run,
 
 @cli.command()
 @click.argument('item_id')
-@click.option('--download-dir', default='./downloads', help='Directory to store downloaded files')
+@click.option('--download-dir', default=None, help='Directory to store downloaded files (default: ./data/downloads)')
 @click.option('--file-types', default='pdf,jp2,ocr,metadata', help='Comma-separated file types to download (pdf,jp2,ocr,metadata)')
 def download_page(item_id, download_dir, file_types):
     """Download a specific page by item ID."""
@@ -2161,12 +2164,15 @@ def retry_failed_facets(batch_size, max_items):
 
 
 @cli.command()
-@click.option('--download-dir', default='./downloads', help='Directory to check')
+@click.option('--download-dir', default=None, help='Directory to check (default: ./data/downloads)')
 def download_stats(download_dir):
     """Show comprehensive download statistics."""
     config = Config()
     storage = NewsStorage(**config.get_storage_config())
     client = LocApiClient(**config.get_api_config())
+    
+    # Use config default if not specified  
+    download_dir = download_dir or config.download_dir
     downloader = DownloadProcessor(storage, client, download_dir=download_dir)
     
     try:
@@ -2204,11 +2210,14 @@ def download_stats(download_dir):
 
 
 @cli.command()
-@click.option('--download-dir', default='./downloads', help='Directory to clean')
+@click.option('--download-dir', default=None, help='Directory to clean (default: ./data/downloads)')
 def cleanup_downloads(download_dir):
     """Clean up incomplete or corrupted download files."""
     config = Config()
     storage = NewsStorage(**config.get_storage_config())
+    
+    # Use config default if not specified
+    download_dir = download_dir or config.download_dir
     client = LocApiClient(**config.get_api_config())
     downloader = DownloadProcessor(storage, client, download_dir=download_dir)
     
@@ -2231,11 +2240,14 @@ def cleanup_downloads(download_dir):
 @click.option('--priority', default=None, type=int, help='Only download items with this priority')
 @click.option('--queue-type', help='Only download items of this type (page, facet, periodical)')
 @click.option('--max-items', default=10, type=int, help='Maximum items to download')
-@click.option('--download-dir', default='./downloads', help='Directory to store files')
+@click.option('--download-dir', default=None, help='Directory to store files (default: ./data/downloads)')
 @click.option('--file-types', default='pdf,jp2,ocr,metadata', help='Comma-separated file types to download (pdf,jp2,ocr,metadata)')
 def download_priority(priority, queue_type, max_items, download_dir, file_types):
     """Download items from queue with specific priority or type."""
     config = Config()
+    
+    # Use config default if not specified
+    download_dir = download_dir or config.download_dir
     storage = NewsStorage(**config.get_storage_config())
     client = LocApiClient(**config.get_api_config())
     
