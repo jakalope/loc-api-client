@@ -35,8 +35,20 @@ def create_demo_data():
     import random
     if random.random() > 0.8:  # 20% chance
         stats.is_rate_limited = True
+        stats.captcha_backoff_active = True
         stats.rate_limit_reason = "CAPTCHA Cooldown"
         stats.cooldown_remaining_minutes = random.uniform(5, 45)
+        stats.backoff_multiplier = random.uniform(1.0, 4.0)
+        stats.requests_per_minute = 0
+    else:
+        stats.captcha_backoff_active = False
+        stats.requests_per_minute = random.randint(8, 12)
+    
+    # Enhanced rate limiting demo data
+    stats.current_request_delay = 5.0
+    stats.last_request_time = datetime.now() - timedelta(seconds=random.randint(1, 10))
+    if not stats.captcha_backoff_active:
+        stats.next_request_time = stats.last_request_time + timedelta(seconds=5)
     
     # Estimates
     stats.estimated_discovery_completion = datetime.now() + timedelta(hours=12, minutes=30)

@@ -108,6 +108,37 @@ class BatchDiscoveryProcessor:
         if not issue_url:
             return 0, 0
         
+        # Extract issue metadata from URL for fast duplicate check
+        # URL format: .../lccn/sn12345678/1906-01-01/ed-1/ or .../lccn/sn12345678/1906-01-01/ed-1.json
+        url_parts = issue_url.rstrip('/').replace('.json', '').split('/')
+        if len(url_parts) >= 5 and 'lccn' in url_parts:
+            try:
+                lccn_idx = url_parts.index('lccn')
+                if lccn_idx + 3 < len(url_parts):
+                    lccn = url_parts[lccn_idx + 1]
+                    date = url_parts[lccn_idx + 2]
+                    edition_str = url_parts[lccn_idx + 3]
+                    # Handle ed-1 or just 1 format
+                    if edition_str.startswith('ed-'):
+                        edition = int(edition_str.replace('ed-', ''))
+                    else:
+                        edition = 1
+                    
+                    # Fast check: do we already have pages for this issue?
+                    existing_pages = self.storage.count_issue_pages(lccn, date, edition)
+                    if existing_pages > 0:
+                        self.logger.debug(f"Skipping issue {lccn}/{date}/ed-{edition} - already have {existing_pages} pages")
+                        # Note: We still need to update issue index for proper resume functionality
+                        # This tracks our position in the batch, not work done
+                        self.storage.update_batch_discovery_session(
+                            session_name=session_name,
+                            current_issue_index=issue_idx
+                        )
+                        return 0, 0  # Skip without API call or delay
+            except (ValueError, IndexError) as e:
+                # If we can't parse the URL, just continue with normal processing
+                self.logger.debug(f"Could not parse issue URL for fast skip: {issue_url} - {e}")
+        
         try:
             # Convert issue URL to endpoint
             if issue_url.startswith('https://chroniclingamerica.loc.gov/'):
@@ -391,6 +422,9 @@ class BatchDiscoveryProcessor:
                 initial=current_issue_start  # Start from resume position
             )
             
+            # Track skipped issues for reporting
+            issues_skipped = 0
+            
             for issue_idx, issue_data in enumerate(batch_issues, 1):
                 # Skip issues that were already processed (only in resume batch)
                 if batch_index == start_batch_index and issue_idx <= start_issue_index:
@@ -401,14 +435,19 @@ class BatchDiscoveryProcessor:
                     issue_data, session_name, batch_index, issue_idx, auto_enqueue
                 )
                 
+                # Track if this issue was skipped (no pages discovered means it was skipped)
+                if issue_discovered == 0 and issue_enqueued == 0:
+                    issues_skipped += 1
+                
                 # Update counters
                 batch_discovered += issue_discovered
                 batch_enqueued += issue_enqueued
                 
-                # Update issue progress bar
+                # Update issue progress bar with skip count
                 issue_pbar.set_postfix({
                     'pages': issue_discovered,
-                    'discovered': batch_discovered
+                    'discovered': batch_discovered,
+                    'skipped': issues_skipped
                 })
                 
                 # Update issue progress bar
@@ -416,5 +455,10 @@ class BatchDiscoveryProcessor:
             
             # Close issue progress bar
             issue_pbar.close()
+            
+            # Log summary if we skipped many issues
+            if issues_skipped > 0:
+                skip_percent = (issues_skipped / len(batch_issues)) * 100
+                self.logger.info(f"Batch {batch_name}: Skipped {issues_skipped}/{len(batch_issues)} issues ({skip_percent:.1f}%) - already discovered")
         
         return batch_discovered, batch_enqueued

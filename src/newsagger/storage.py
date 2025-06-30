@@ -249,6 +249,25 @@ class NewsStorage(DatabaseOperationMixin):
             conn.commit()
             return inserted
     
+    def has_issue_pages(self, lccn: str, date: str, edition: int = 1) -> bool:
+        """Check if we already have pages for a specific issue."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                SELECT COUNT(*) FROM pages 
+                WHERE lccn = ? AND date = ? AND edition = ?
+            """, (lccn, date, edition))
+            count = cursor.fetchone()[0]
+            return count > 0
+    
+    def count_issue_pages(self, lccn: str, date: str, edition: int = 1) -> int:
+        """Count how many pages we have for a specific issue."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute("""
+                SELECT COUNT(*) FROM pages 
+                WHERE lccn = ? AND date = ? AND edition = ?
+            """, (lccn, date, edition))
+            return cursor.fetchone()[0]
+    
     def store_pages(self, pages: List[PageInfo]) -> int:
         """Store page metadata, return number of new records."""
         with sqlite3.connect(self.db_path) as conn:

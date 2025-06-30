@@ -548,7 +548,7 @@ class RateLimitedRequestManager:
                 time.sleep(wait_time)
     
     def get_request_stats(self) -> Dict:
-        """Get statistics about request rate limiting."""
+        """Get comprehensive statistics about request rate limiting."""
         with self.rate_limit_lock:
             current_time = time.time()
             # Count requests in last minute
@@ -557,12 +557,34 @@ class RateLimitedRequestManager:
                 if req_time > current_time - 60
             ]
             
+            # Calculate next allowed request time
+            next_request_time = None
+            if self.last_request_time:
+                min_next_time = self.last_request_time + self.min_request_delay
+                if min_next_time > current_time:
+                    next_request_time = min_next_time
+            
+            # Check if we're at rate limit capacity
+            at_rate_limit = len(recent_requests) >= self.max_requests_per_minute
+            
+            # Get CAPTCHA status
+            captcha_manager = GlobalCaptchaManager()
+            captcha_status = captcha_manager.get_status()
+            
             return {
                 'requests_last_minute': len(recent_requests),
                 'max_requests_per_minute': self.max_requests_per_minute,
                 'min_delay_seconds': self.min_request_delay,
                 'last_request_time': self.last_request_time,
-                'time_since_last_request': current_time - self.last_request_time if self.last_request_time else None
+                'next_request_time': next_request_time,
+                'time_since_last_request': current_time - self.last_request_time if self.last_request_time else None,
+                'at_rate_limit': at_rate_limit,
+                'current_delay_active': next_request_time is not None,
+                'captcha_blocked': captcha_status['blocked'],
+                'captcha_reason': captcha_status['reason'],
+                'captcha_cooling_off_hours': captcha_status['cooling_off_hours'],
+                'captcha_multiplier': captcha_status['cooling_off_multiplier'],
+                'consecutive_captchas': captcha_status['consecutive_captchas']
             }
 
 

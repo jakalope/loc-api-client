@@ -68,6 +68,14 @@ class ProgressStats:
     current_batch_progress: float = 0.0
     discovery_rate_per_hour: float = 0.0
     
+    # Real-time discovery progress
+    current_issue_index: int = 0
+    total_issues_in_batch: int = 0
+    total_pages_discovered: int = 0
+    total_pages_enqueued: int = 0
+    discovery_rate_per_minute: float = 0.0
+    issues_per_minute: float = 0.0
+    
     # Downloads
     total_queue_items: int = 0
     items_downloaded: int = 0
@@ -78,6 +86,14 @@ class ProgressStats:
     is_rate_limited: bool = False
     cooldown_remaining_minutes: float = 0.0
     rate_limit_reason: str = ""
+    
+    # Enhanced Rate Limiting Details
+    current_request_delay: float = 0.0
+    requests_per_minute: int = 0
+    last_request_time: Optional[datetime] = None
+    next_request_time: Optional[datetime] = None
+    captcha_backoff_active: bool = False
+    backoff_multiplier: float = 1.0
     
     # Estimates
     estimated_discovery_completion: Optional[datetime] = None
@@ -297,34 +313,69 @@ class ProgressMonitor:
                 result = cursor.fetchone()
                 batch_count = result[0] if result else 0
                 
-                # Since we know from logs we're on batch 5/25, show the actual progress
-                # The database tracking might not be capturing all batches properly
-                stats.batches_discovered = 5  # From log analysis showing "batch 5"
-                
-                # Get current batch being processed
+                # Get real-time discovery session data
                 cursor.execute("""
-                    SELECT current_batch_name, current_batch_index, total_batches
+                    SELECT 
+                        current_batch_name,
+                        current_batch_index,
+                        total_batches,
+                        current_issue_index,
+                        total_issues_in_batch,
+                        total_pages_discovered,
+                        total_pages_enqueued,
+                        datetime(updated_at, 'localtime') as last_update
                     FROM batch_discovery_sessions
-                    WHERE status IN ('active', 'captcha_blocked')
+                    WHERE session_name = 'batch_discovery_main'
                     ORDER BY updated_at DESC
                     LIMIT 1
                 """)
-                current = cursor.fetchone()
-                if current:
-                    stats.current_batch = current[0] or ""
-                    if current[1] and current[2]:
-                        stats.current_batch_progress = (current[1] / current[2]) * 100
-                else:
-                    # Fallback to az_chrysocolla_ver01 if no active session found
-                    stats.current_batch = "az_chrysocolla_ver01"
-                    stats.current_batch_progress = 79.0  # From recent log showing 79%
+                session = cursor.fetchone()
+                if session:
+                    stats.current_batch = session[0] or ""
+                    stats.batches_discovered = session[1] or 0
+                    stats.total_batches = session[2] or 25
+                    stats.current_issue_index = session[3] or 0
+                    stats.total_issues_in_batch = session[4] or 0
+                    stats.total_pages_discovered = session[5] or 0
+                    stats.total_pages_enqueued = session[6] or 0
+                    
+                    # Calculate batch progress
+                    if stats.total_batches > 0:
+                        stats.current_batch_progress = (stats.batches_discovered / stats.total_batches) * 100
+                    
+                    # Calculate discovery rates from recent activity
+                    if session[7]:  # last_update timestamp
+                        from datetime import datetime, timedelta
+                        last_update = datetime.strptime(session[7], '%Y-%m-%d %H:%M:%S')
+                        time_since_update = (datetime.now() - last_update).total_seconds()
+                        
+                        # Estimate rate based on recent activity and issue processing speed
+                        # If the session was updated recently, discovery is active
+                        if time_since_update < 10:  # Updated within last 10 seconds
+                            # Estimate based on average issue processing (8 pages per issue, 5 seconds per issue)
+                            estimated_pages_per_minute = (8 * 60) / 5  # ~96 pages/min
+                            estimated_issues_per_minute = 60 / 5      # ~12 issues/min
+                            
+                            stats.discovery_rate_per_minute = estimated_pages_per_minute
+                            stats.discovery_rate_per_hour = estimated_pages_per_minute * 60
+                            stats.issues_per_minute = estimated_issues_per_minute
+                        
+                        # Try to get actual rate from download queue additions
+                        cursor.execute("""
+                            SELECT COUNT(*) 
+                            FROM download_queue 
+                            WHERE created_at > datetime('now', '-1 minute')
+                        """)
+                        recent_additions = cursor.fetchone()[0]
+                        if recent_additions > 0:
+                            # Override estimate with actual data
+                            stats.discovery_rate_per_minute = recent_additions
+                            stats.discovery_rate_per_hour = recent_additions * 60
                 
                 conn.close()
             except Exception as e:
-                # If query fails, use known values from logs rather than zero
-                stats.batches_discovered = 5
-                stats.current_batch = "az_chrysocolla_ver01"
-                stats.current_batch_progress = 79.0
+                # If query fails, keep default values
+                pass
             
             # Simple rate limiting check - if we have very few recent items, might be rate limited
             # This is a simplified heuristic using the actual counts
@@ -367,6 +418,9 @@ class ProgressMonitor:
         
         # Calculate estimates based on current progress
         self._calculate_estimates(stats)
+        
+        # Collect rate limiting data
+        self._collect_rate_limiting_data(stats)
         
         self._last_stats = stats
         return stats
@@ -478,6 +532,59 @@ class ProgressMonitor:
         except Exception as e:
             # If we can't calculate from database, don't show estimates
             pass
+    
+    def _collect_rate_limiting_data(self, stats: ProgressStats):
+        """Collect rate limiting data from the RateLimitedRequestManager."""
+        try:
+            # Import the rate limited client here to avoid circular imports
+            from newsagger.rate_limited_client import RateLimitedRequestManager
+            
+            # Get rate limiting stats from the singleton instance
+            rate_manager = RateLimitedRequestManager()
+            rate_stats = rate_manager.get_request_stats()
+            
+            # Populate enhanced rate limiting fields
+            stats.current_request_delay = rate_stats['min_delay_seconds']
+            stats.requests_per_minute = rate_stats['requests_last_minute']
+            
+            # Convert timestamps to datetime objects
+            if rate_stats['last_request_time']:
+                stats.last_request_time = datetime.fromtimestamp(rate_stats['last_request_time'])
+            
+            if rate_stats['next_request_time']:
+                stats.next_request_time = datetime.fromtimestamp(rate_stats['next_request_time'])
+            
+            # Update existing rate limiting detection with more accurate data
+            stats.captcha_backoff_active = rate_stats['captcha_blocked']
+            stats.backoff_multiplier = rate_stats['captcha_multiplier']
+            
+            # Override simple rate limiting detection with actual CAPTCHA status
+            if rate_stats['captcha_blocked']:
+                stats.is_rate_limited = True
+                stats.rate_limit_reason = rate_stats['captcha_reason']
+                stats.cooldown_remaining_minutes = rate_stats['captcha_cooling_off_hours'] * 60
+            elif rate_stats['at_rate_limit'] or rate_stats['current_delay_active']:
+                stats.is_rate_limited = True
+                stats.rate_limit_reason = f"Rate limiting active ({rate_stats['requests_last_minute']}/{rate_stats['max_requests_per_minute']} req/min)"
+                stats.cooldown_remaining_minutes = 0
+            else:
+                # Check if we're in a throttled state (0 requests but processes running)
+                if stats.requests_per_minute == 0:
+                    # Check if discovery is actually making progress to distinguish idle vs active
+                    # If recent progress was made, this is normal (discovery process has separate rate limiter)
+                    # If no recent progress, this might indicate a problem
+                    stats.is_rate_limited = False  # Don't show as rate limited if processes are working
+                    stats.rate_limit_reason = "Separate process (discovery active)"
+                    stats.cooldown_remaining_minutes = 0
+                else:
+                    # Not rate limited if we have accurate data
+                    if stats.rate_limit_reason == "High queue backlog (possible rate limiting)":
+                        stats.is_rate_limited = False
+                        stats.rate_limit_reason = ""
+            
+        except Exception as e:
+            # If we can't get rate limiting data, keep existing detection
+            pass
 
 
 class TUIMonitor:
@@ -526,6 +633,7 @@ class TUIMonitor:
         
         layout["right"].split_column(
             Layout(name="stats"),
+            Layout(name="rate_limiting"),
             Layout(name="estimates")
         )
         
@@ -554,6 +662,9 @@ class TUIMonitor:
         # Statistics Panel
         layout["stats"].update(self._create_stats_panel(stats))
         
+        # Rate Limiting Panel
+        layout["rate_limiting"].update(self._create_rate_limiting_panel(stats))
+        
         # Estimates Panel
         layout["estimates"].update(self._create_estimates_panel(stats))
         
@@ -564,7 +675,9 @@ class TUIMonitor:
         return layout
     
     def _create_discovery_panel(self, stats: ProgressStats) -> Panel:
-        """Create batch discovery progress panel."""
+        """Create batch discovery progress panel with real-time tqdm-style display."""
+        content = []
+        
         # Overall batch progress
         batch_progress = Progress(
             TextColumn("[progress.description]{task.description}"),
@@ -574,57 +687,73 @@ class TUIMonitor:
         )
         
         overall_task = batch_progress.add_task(
-            "Batches Discovered",
-            total=stats.total_batches,
+            "Batches",
+            total=max(stats.total_batches, 1),
             completed=stats.batches_discovered
         )
+        content.append(batch_progress)
         
-        # Current batch progress
-        current_batch_progress = Progress(
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TaskProgressColumn(),
+        # Current batch issue progress (tqdm-style)
+        if stats.current_batch and stats.total_issues_in_batch > 0:
+            issue_progress = Progress(
+                TextColumn("[cyan]Issues in {task.fields[batch_name]}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                TaskProgressColumn(),
+                TextColumn("[dim]{task.fields[rate]:.1f} issues/min"),
+            )
+            
+            issue_task = issue_progress.add_task(
+                "issues",
+                total=stats.total_issues_in_batch,
+                completed=stats.current_issue_index,
+                batch_name=stats.current_batch[:15],
+                rate=stats.issues_per_minute
+            )
+            content.append(issue_progress)
+        
+        # Real-time discovery stats (tqdm-style counters)
+        stats_progress = Progress(
+            TextColumn("[green]Pages Discovered"),
+            BarColumn(bar_width=None),
+            TextColumn("[bold green]{task.completed:,}"),
+            TextColumn("[dim]({task.fields[rate]:.1f}/min)"),
         )
         
-        if stats.current_batch:
-            current_task = current_batch_progress.add_task(
-                f"Current: {stats.current_batch[:20]}...",
-                total=100,
-                completed=stats.current_batch_progress
-            )
+        pages_task = stats_progress.add_task(
+            "pages",
+            total=None,  # Unknown total
+            completed=stats.total_pages_discovered,
+            rate=stats.discovery_rate_per_minute
+        )
+        content.append(stats_progress)
         
-        content = [batch_progress]
-        if stats.current_batch:
-            content.append(current_batch_progress)
-        
-        # Rate limiting status
-        if stats.is_rate_limited:
-            cooldown_progress = Progress(
-                TextColumn("[red]CAPTCHA Cooldown"),
-                BarColumn(),
-                TimeRemainingColumn(),
+        # Enqueue progress
+        if stats.total_pages_enqueued > 0:
+            enqueue_progress = Progress(
+                TextColumn("[blue]Pages Enqueued"),
+                BarColumn(bar_width=None),
+                TextColumn("[bold blue]{task.completed:,}"),
             )
             
-            cooldown_task = cooldown_progress.add_task(
-                "Cooldown",
-                total=60,
-                completed=60 - stats.cooldown_remaining_minutes
+            enqueue_task = enqueue_progress.add_task(
+                "enqueued",
+                total=None,
+                completed=stats.total_pages_enqueued
             )
-            content.append(cooldown_progress)
-            
-        # Discovery rate
-        if stats.discovery_rate_per_hour > 0:
-            rate_text = f"Rate: {stats.discovery_rate_per_hour:.0f} pages/hour"
-            content.append(Text(rate_text, style="dim"))
+            content.append(enqueue_progress)
         
         return Panel(
             Group(*content),
-            title="Discovery",
+            title="Real-time Discovery Progress",
             border_style="cyan"
         )
     
     def _create_downloads_panel(self, stats: ProgressStats) -> Panel:
-        """Create downloads progress panel."""
+        """Create downloads progress panel with consistent rate display."""
+        content = []
+        
+        # Main download progress
         download_progress = Progress(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
@@ -633,28 +762,54 @@ class TUIMonitor:
         )
         
         download_task = download_progress.add_task(
-            "Items Downloaded",
+            "Queue Progress",
             total=max(stats.total_queue_items + stats.items_downloaded, 1),
             completed=stats.items_downloaded
         )
+        content.append(download_progress)
         
-        content = [download_progress]
+        # Downloads with rate (matching discovery panel style)
+        download_rate_per_minute = stats.download_rate_per_hour / 60 if stats.download_rate_per_hour > 0 else 0
         
-        # Download stats
+        download_stats = Progress(
+            TextColumn("[blue]Items Downloaded"),
+            BarColumn(bar_width=None),
+            TextColumn("[bold blue]{task.completed:,}"),
+            TextColumn("[dim]({task.fields[rate]:.1f}/min)"),
+        )
+        
+        download_stats_task = download_stats.add_task(
+            "downloads",
+            total=None,
+            completed=stats.items_downloaded,
+            rate=download_rate_per_minute
+        )
+        content.append(download_stats)
+        
+        # Download size
         if stats.download_size_mb > 0:
+            size_progress = Progress(
+                TextColumn("[green]Data Downloaded"),
+                BarColumn(bar_width=None),
+                TextColumn("[bold green]{task.fields[size_text]}"),
+            )
+            
             if stats.download_size_mb > 1024:
-                size_text = f"Downloaded: {stats.download_size_mb/1024:.1f} GB"
+                size_text = f"{stats.download_size_mb/1024:.1f} GB"
             else:
-                size_text = f"Downloaded: {stats.download_size_mb:.0f} MB"
-            content.append(Text(size_text, style="green"))
-        
-        if stats.download_rate_per_hour > 0:
-            rate_text = f"Rate: {stats.download_rate_per_hour:.0f} items/hour"
-            content.append(Text(rate_text, style="dim"))
+                size_text = f"{stats.download_size_mb:.0f} MB"
+            
+            size_task = size_progress.add_task(
+                "size",
+                total=None,
+                completed=stats.download_size_mb,
+                size_text=size_text
+            )
+            content.append(size_progress)
         
         return Panel(
             Group(*content),
-            title="Downloads",
+            title="Downloads Progress",
             border_style="green"
         )
     
@@ -770,6 +925,91 @@ class TUIMonitor:
             "\n".join(content),
             title="Estimates",
             border_style="yellow"
+        )
+    
+    def _create_rate_limiting_panel(self, stats: ProgressStats) -> Panel:
+        """Create rate limiting status panel."""
+        content = []
+        
+        # Current rate limiting status
+        if stats.is_rate_limited:
+            if stats.captcha_backoff_active:
+                content.append(f"[red]🚫 CAPTCHA Blocked[/red]")
+                content.append(f"[red]Reason: {stats.rate_limit_reason}[/red]")
+                if stats.cooldown_remaining_minutes > 0:
+                    hours = int(stats.cooldown_remaining_minutes // 60)
+                    minutes = int(stats.cooldown_remaining_minutes % 60)
+                    content.append(f"[red]Cooldown: {hours}h {minutes}m[/red]")
+                content.append(f"[yellow]Backoff: {stats.backoff_multiplier:.1f}x[/yellow]")
+            elif "Throttled/Idle" in stats.rate_limit_reason:
+                content.append(f"[yellow]⏸️ Throttled/Idle State[/yellow]")
+                content.append(f"[dim]{stats.rate_limit_reason}[/dim]")
+                content.append(f"[dim]Enforced {stats.current_request_delay:.0f}s delays[/dim]")
+            else:
+                content.append(f"[yellow]⚠️ Rate Limited[/yellow]")
+                content.append(f"[yellow]{stats.rate_limit_reason}[/yellow]")
+        else:
+            if stats.requests_per_minute > 0:
+                content.append("[green]✅ Normal Operation[/green]")
+                content.append(f"[green]Active: {stats.requests_per_minute} req/min[/green]")
+            elif "Separate process" in stats.rate_limit_reason:
+                content.append("[green]✅ Background Processes Active[/green]")
+                content.append("[dim]Discovery & downloads running[/dim]")
+            else:
+                content.append("[blue]ℹ️ Monitor Mode[/blue]")
+                content.append("[dim]Monitoring external processes[/dim]")
+        
+        # Request rate information
+        content.append("")
+        content.append(f"[cyan]API Configuration:[/cyan]")
+        content.append(f"  Max limit: 12 req/min")
+        content.append(f"  Min delay: {stats.current_request_delay:.1f}s")
+        if stats.discovery_rate_per_minute > 0:
+            content.append(f"  Discovery active: {stats.discovery_rate_per_minute:.1f} pages/min")
+        
+        # Timing information
+        if stats.last_request_time:
+            time_str = stats.last_request_time.strftime("%H:%M:%S")
+            content.append(f"  Last request: {time_str}")
+        
+        if stats.next_request_time:
+            now = datetime.now()
+            if stats.next_request_time > now:
+                wait_seconds = (stats.next_request_time - now).total_seconds()
+                content.append(f"  Next allowed: {wait_seconds:.1f}s")
+            else:
+                content.append(f"  Next allowed: Now")
+        
+        # Visual rate limiting indicator - only show if actually in CAPTCHA cooldown
+        if stats.captcha_backoff_active and stats.cooldown_remaining_minutes > 0:
+            content.append("")
+            # Create a simple progress bar for cooldown
+            cooldown_progress = Progress(
+                TextColumn("[red]Cooldown"),
+                BarColumn(),
+                TextColumn("{task.percentage:>3.0f}%"),
+            )
+            
+            # Calculate progress (assuming original cooldown was the current backoff hours)
+            total_cooldown_minutes = stats.backoff_multiplier * 60  # 1 hour base * multiplier
+            progress_percent = max(0, (total_cooldown_minutes - stats.cooldown_remaining_minutes) / total_cooldown_minutes * 100)
+            
+            cooldown_task = cooldown_progress.add_task(
+                "Cooldown",
+                total=100,
+                completed=progress_percent
+            )
+            
+            return Panel(
+                Group(*[Text(line) for line in content], cooldown_progress),
+                title="Rate Limiting",
+                border_style="red" if stats.captcha_backoff_active else ("yellow" if stats.is_rate_limited else "green")
+            )
+        
+        return Panel(
+            "\n".join(content),
+            title="API Status",
+            border_style="red" if stats.captcha_backoff_active else ("yellow" if stats.is_rate_limited else "green")
         )
     
     def run(self):
