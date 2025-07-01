@@ -98,6 +98,11 @@ class ProgressStats:
     # Estimates
     estimated_discovery_completion: Optional[datetime] = None
     estimated_download_completion: Optional[datetime] = None
+    
+    # Stall Detection
+    downloads_stalled: bool = False
+    downloads_stall_reason: str = ""
+    last_download_time: Optional[datetime] = None
 
 
 class BackgroundProcessManager:
@@ -523,23 +528,91 @@ class ProgressMonitor:
             
             # Download estimate based on completed vs queued items
             if stats.items_downloaded > 0 and stats.total_queue_items > stats.items_downloaded:
-                # Get recent download completion activity
+                # Get download completion activity in multiple time windows
                 cursor.execute("""
-                    SELECT COUNT(*) 
-                    FROM download_queue 
-                    WHERE status = 'completed' 
-                    AND updated_at > datetime('now', '-1 hour')
+                    SELECT 
+                        (SELECT COUNT(*) FROM download_queue WHERE status = 'completed' AND updated_at > datetime('now', '-5 minutes')) as last_5_min,
+                        (SELECT COUNT(*) FROM download_queue WHERE status = 'completed' AND updated_at > datetime('now', '-15 minutes')) as last_15_min,
+                        (SELECT COUNT(*) FROM download_queue WHERE status = 'completed' AND updated_at > datetime('now', '-1 hour')) as last_hour
                 """)
                 result = cursor.fetchone()
-                recent_completions = result[0] if result else 0
+                completions_5min = result[0] if result else 0
+                completions_15min = result[1] if result else 0
+                completions_hour = result[2] if result else 0
                 
-                if recent_completions > 0:
-                    # Calculate hourly rate from recent activity
-                    stats.download_rate_per_hour = recent_completions
+                # Use the most recent non-zero rate, preferring shorter time windows
+                if completions_5min > 0:
+                    # Use 5-minute rate if active
+                    stats.download_rate_per_hour = completions_5min * 12  # Scale to hourly
+                elif completions_15min > 0:
+                    # Use 15-minute rate if active
+                    stats.download_rate_per_hour = completions_15min * 4  # Scale to hourly
+                elif completions_hour > 0:
+                    # Use hourly rate as fallback
+                    stats.download_rate_per_hour = completions_hour
+                else:
+                    # No recent activity - set rate to 0
+                    stats.download_rate_per_hour = 0
                     
+                # Check for download stalls and determine reason
+                if completions_5min == 0 and stats.total_queue_items > stats.items_downloaded:
+                    stats.downloads_stalled = True
+                    
+                    # Try to determine why downloads are stalled
+                    # Check for CAPTCHA first
+                    if stats.captcha_backoff_active:
+                        stats.downloads_stall_reason = "CAPTCHA cooldown active"
+                    else:
+                        # Check for items stuck in progress
+                        cursor.execute("""
+                            SELECT COUNT(*), MIN(updated_at) 
+                            FROM download_queue 
+                            WHERE status = 'in_progress'
+                        """)
+                        in_progress_result = cursor.fetchone()
+                        in_progress_count = in_progress_result[0] if in_progress_result else 0
+                        oldest_in_progress = in_progress_result[1] if in_progress_result and in_progress_result[1] else None
+                        
+                        if in_progress_count > 0 and oldest_in_progress:
+                            # Check how long items have been in progress
+                            oldest_time = datetime.strptime(oldest_in_progress, '%Y-%m-%d %H:%M:%S')
+                            stuck_minutes = (now - oldest_time).total_seconds() / 60
+                            
+                            if stuck_minutes > 10:  # Items stuck for over 10 minutes
+                                stats.downloads_stall_reason = f"{in_progress_count} items stuck in progress for {int(stuck_minutes)}m"
+                            else:
+                                stats.downloads_stall_reason = f"Processing {in_progress_count} items (slow network?)"
+                        else:
+                            # Check if there are any active items
+                            cursor.execute("SELECT COUNT(*) FROM download_queue WHERE status = 'active'")
+                            active_count = cursor.fetchone()[0]
+                            
+                            if active_count == 0:
+                                stats.downloads_stall_reason = "No items in active status"
+                            else:
+                                stats.downloads_stall_reason = "Unknown - check process logs"
+                else:
+                    stats.downloads_stalled = False
+                    stats.downloads_stall_reason = ""
+                    
+                # Get last download time
+                cursor.execute("""
+                    SELECT MAX(updated_at) 
+                    FROM download_queue 
+                    WHERE status = 'completed'
+                """)
+                last_download_result = cursor.fetchone()
+                if last_download_result and last_download_result[0]:
+                    stats.last_download_time = datetime.strptime(last_download_result[0], '%Y-%m-%d %H:%M:%S')
+                    
+                # Calculate ETA only if downloads are actually happening
+                if stats.download_rate_per_hour > 0:
                     remaining_items = stats.total_queue_items - stats.items_downloaded
                     hours_remaining = remaining_items / stats.download_rate_per_hour
                     stats.estimated_download_completion = now + timedelta(hours=hours_remaining)
+                else:
+                    # Downloads stalled - no ETA
+                    stats.estimated_download_completion = None
             
             conn.close()
             
@@ -785,6 +858,19 @@ class TUIMonitor:
         # Downloads with rate (matching discovery panel style)
         download_rate_per_minute = stats.download_rate_per_hour / 60 if stats.download_rate_per_hour > 0 else 0
         
+        # Show stall status if downloads are stalled
+        if stats.downloads_stalled:
+            stall_text = Text()
+            stall_text.append("⚠️ DOWNLOADS STALLED", style="bold red")
+            stall_text.append(f" - {stats.downloads_stall_reason}", style="yellow")
+            content.append(stall_text)
+            
+            # Show time since last download
+            if stats.last_download_time:
+                time_since = datetime.now() - stats.last_download_time
+                minutes_since = int(time_since.total_seconds() / 60)
+                content.append(Text(f"Last download: {minutes_since} minutes ago", style="dim"))
+        
         download_stats = Progress(
             TextColumn("[blue]Items Downloaded"),
             BarColumn(bar_width=None),
@@ -929,6 +1015,8 @@ class TUIMonitor:
         if stats.estimated_download_completion:
             eta = stats.estimated_download_completion.strftime("%H:%M:%S")
             content.append(f"Download ETA: {eta}")
+        elif stats.downloads_stalled:
+            content.append(f"Download ETA: Stalled - {stats.downloads_stall_reason}")
         else:
             content.append("Download ETA: Calculating...")
         
