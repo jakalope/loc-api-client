@@ -9,6 +9,7 @@ import os
 import logging
 import requests
 import hashlib
+import concurrent.futures
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
@@ -26,7 +27,9 @@ class DownloadProcessor:
     
     def __init__(self, storage: NewsStorage, api_client: LocApiClient, 
                  download_dir: str = None, 
-                 file_types: List[str] = None):
+                 file_types: List[str] = None,
+                 parallel_workers: int = None,
+                 file_concurrency: int = None):
         self.storage = storage
         self.api_client = api_client
         
@@ -42,6 +45,20 @@ class DownloadProcessor:
         # Configure which file types to download
         # Default: download all available types
         self.file_types = file_types or ['pdf', 'jp2', 'ocr', 'metadata']
+        
+        # Configure parallel processing
+        # Default to CPU core count, with reasonable bounds
+        if parallel_workers is None:
+            parallel_workers = max(1, min(os.cpu_count() or 4, 16))  # 1-16 workers
+        self.parallel_workers = parallel_workers
+        self.logger.info(f"Configured for parallel queue processing with {self.parallel_workers} workers")
+        
+        # Configure file download concurrency
+        # Default to 6 concurrent file downloads per item (PDF, JP2, etc.)
+        if file_concurrency is None:
+            file_concurrency = 6  # Good balance for concurrent file downloads
+        self.file_concurrency = max(1, min(file_concurrency, 12))  # 1-12 concurrent downloads
+        self.logger.info(f"Configured for concurrent file downloads with {self.file_concurrency} workers per item")
         
         # Set up download session with appropriate headers
         self.session = requests.Session()
@@ -71,8 +88,8 @@ class DownloadProcessor:
     
     def _process_queue_single_batch(self, max_items: int = None, max_size_mb: float = None, 
                                    dry_run: bool = False) -> Dict:
-        """Original single-batch processing logic."""
-        self.logger.info("Starting download queue processing...")
+        """Parallel queue processing implementation."""
+        self.logger.info(f"Starting parallel download queue processing with {self.parallel_workers} workers...")
         
         # Get queued items ordered by priority
         queue_items = self.storage.get_download_queue(status='queued')
@@ -105,84 +122,119 @@ class DownloadProcessor:
                 "dry_run": True
             }
         
-        # Process downloads with progress tracking and batched database updates
-        total_size_mb = 0
-        start_time = datetime.now()
-        batch_updates = []  # Store updates to batch process
+        # Process downloads with parallel workers
+        return self._process_items_parallel(queue_items)
+    
+    def _process_items_parallel(self, queue_items: List[Dict]) -> Dict:
+        """Process queue items in parallel using ThreadPoolExecutor."""
+        import threading
         
-        with ProgressTracker(total=len(queue_items), desc="Processing downloads", unit="files") as progress:
-            for i, item in enumerate(queue_items):
-                try:
-                    # Mark item as active (immediate update for tracking)
-                    self.storage.update_queue_item(item['id'], status='active')
-                    
-                    # Process the download based on queue type
-                    result = self._process_queue_item(item)
-                    
+        start_time = datetime.now()
+        total_size_mb = 0
+        
+        # Thread-safe data structures for collecting results
+        results_lock = threading.Lock()
+        batch_updates = []
+        
+        def process_single_item(item):
+            """Process a single queue item (thread-safe)."""
+            try:
+                # Mark item as active
+                self.storage.update_queue_item(item['id'], status='active')
+                
+                # Process the download based on queue type
+                result = self._process_queue_item(item)
+                
+                # Thread-safe result collection
+                with results_lock:
                     if result['success']:
+                        nonlocal total_size_mb
                         total_size_mb += result.get('size_mb', 0)
                         
-                        # Queue update for batch processing
                         batch_updates.append({
                             'id': item['id'],
                             'status': 'completed',
                             'progress_percent': 100.0,
-                            'error_message': None
+                            'error_message': None,
+                            'size_mb': result.get('size_mb', 0)
                         })
                         
-                        # Update progress with custom postfix for size
-                        progress.update(success=True)
-                        progress.set_postfix(size_mb=f"{total_size_mb:.1f}")
+                        return {'success': True, 'item_id': item['id'], 'size_mb': result.get('size_mb', 0)}
                     else:
-                        # Queue update for batch processing
                         batch_updates.append({
                             'id': item['id'],
                             'status': 'failed',
                             'error_message': result.get('error', 'Unknown error'),
-                            'progress_percent': 0
+                            'progress_percent': 0,
+                            'size_mb': 0
                         })
                         
-                        progress.update(success=False)
-                        progress.set_postfix(size_mb=f"{total_size_mb:.1f}")
-                    
-                    # Process batch updates every 10 items or at the end
-                    if len(batch_updates) >= 10 or i == len(queue_items) - 1:
-                        self._process_batch_updates(batch_updates)
-                        batch_updates = []
-                    
-                except Exception as e:
-                    self.logger.error(f"Error processing queue item {item['id']}: {e}")
+                        return {'success': False, 'item_id': item['id'], 'error': result.get('error', 'Unknown error')}
+                
+            except Exception as e:
+                self.logger.error(f"Error processing queue item {item['id']}: {e}")
+                
+                with results_lock:
                     batch_updates.append({
                         'id': item['id'],
                         'status': 'failed',
                         'error_message': str(e),
-                        'progress_percent': 0
+                        'progress_percent': 0,
+                        'size_mb': 0
                     })
+                
+                return {'success': False, 'item_id': item['id'], 'error': str(e)}
+        
+        # Process items in parallel with progress tracking
+        with ProgressTracker(total=len(queue_items), desc="Processing downloads", unit="files") as progress:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.parallel_workers) as executor:
+                # Submit all tasks
+                future_to_item = {executor.submit(process_single_item, item): item for item in queue_items}
+                
+                # Collect results as they complete
+                completed_results = []
+                for future in concurrent.futures.as_completed(future_to_item):
+                    result = future.result()
+                    completed_results.append(result)
                     
-                    progress.update(success=False)
-                    progress.set_postfix(size_mb=f"{total_size_mb:.1f}")
-            
-            # Process any remaining batch updates
-            if batch_updates:
-                self._process_batch_updates(batch_updates)
+                    # Update progress
+                    if result['success']:
+                        progress.update(success=True)
+                        with results_lock:
+                            progress.set_postfix(size_mb=f"{total_size_mb:.1f}")
+                    else:
+                        progress.update(success=False)
+                        self.logger.warning(f"Failed to process item {result['item_id']}: {result.get('error', 'Unknown error')}")
+                    
+                    # Process database updates in smaller batches for faster UI updates
+                    with results_lock:
+                        if len(batch_updates) >= 5:  # Smaller batches for faster progress updates
+                            self._process_batch_updates(batch_updates.copy())
+                            batch_updates.clear()
         
-        # Get final statistics from progress tracker and build return stats
-        final_stats = progress.get_stats()
+        # Process any remaining batch updates
+        if batch_updates:
+            self._process_batch_updates(batch_updates)
+        
+        # Calculate final statistics
         end_time = datetime.now()
+        success_count = sum(1 for r in completed_results if r['success'])
+        error_count = len(completed_results) - success_count
         
-        # Build return stats in original format for compatibility
         stats = {
-            "downloaded": final_stats['success'],
-            "errors": final_stats['errors'],
-            "skipped": final_stats['skipped'],
+            "downloaded": success_count,
+            "errors": error_count,
+            "skipped": 0,  # No skipped items in this implementation
             "total_size_mb": total_size_mb,
             "start_time": start_time,
             "end_time": end_time,
-            "duration_minutes": (end_time - start_time).total_seconds() / 60
+            "duration_minutes": (end_time - start_time).total_seconds() / 60,
+            "parallel_workers": self.parallel_workers
         }
         
-        self.logger.info(f"Download processing complete: {stats['downloaded']} downloaded, "
-                        f"{stats['errors']} errors, {stats['total_size_mb']:.1f} MB total")
+        self.logger.info(f"Parallel download processing complete: {stats['downloaded']} downloaded, "
+                        f"{stats['errors']} errors, {stats['total_size_mb']:.1f} MB total "
+                        f"using {self.parallel_workers} workers")
         
         return stats
     
@@ -307,9 +359,9 @@ class DownloadProcessor:
                 self.logger.info(f"{reason} requested, stopping before processing batch")
                 break
             
-            # Process the batch using existing single-batch logic
+            # Process the batch using parallel processing
             try:
-                batch_stats = self._process_batch_items(batch_items, lambda: shutdown_requested or force_quit)
+                batch_stats = self._process_items_parallel(batch_items)
                 
                 # Update global stats
                 global_stats["downloaded"] += batch_stats.get("downloaded", 0)
@@ -422,8 +474,8 @@ class DownloadProcessor:
                         'error_message': str(e)
                     })
                 
-                # Process database updates in batches
-                if len(batch_updates) >= 10:
+                # Process database updates in smaller batches for faster UI updates
+                if len(batch_updates) >= 3:
                     self._process_batch_updates(batch_updates)
                     batch_updates = []
             
@@ -802,9 +854,9 @@ class DownloadProcessor:
                 'attempts': max_retries
             }
         
-        # Execute downloads concurrently (increased workers for better throughput)
+        # Execute downloads concurrently using configured file concurrency
         results = []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.file_concurrency) as executor:
             future_to_task = {executor.submit(download_single_file, task): task for task in download_tasks}
             
             for future in concurrent.futures.as_completed(future_to_task):

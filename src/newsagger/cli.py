@@ -1892,10 +1892,12 @@ def show_queue(status, limit):
 @click.option('--max-size-mb', default=None, type=float, help='Maximum total download size in MB')
 @click.option('--download-dir', default=None, help='Directory to store downloaded files (default: ./data/downloads)')
 @click.option('--file-types', default='pdf,jp2,ocr,metadata', help='Comma-separated file types to download (pdf,jp2,ocr,metadata)')
+@click.option('--parallel-workers', default=None, type=int, help='Number of parallel workers (default: CPU core count)')
+@click.option('--file-concurrency', default=None, type=int, help='Number of concurrent file downloads per item (default: 6)')
 @click.option('--dry-run', is_flag=True, help='Show what would be downloaded without actually doing it')
 @click.option('--continuous', is_flag=True, help='Continuously process new items as they become available')
 @click.option('--max-idle-minutes', default=10, type=int, help='In continuous mode, stop after this many minutes without new items')
-def process_downloads(max_items, max_size_mb, download_dir, file_types, dry_run, continuous, max_idle_minutes):
+def process_downloads(max_items, max_size_mb, download_dir, file_types, parallel_workers, file_concurrency, dry_run, continuous, max_idle_minutes):
     """Process the download queue and download files."""
     config = Config()
     storage = NewsStorage(**config.get_storage_config())
@@ -1913,7 +1915,7 @@ def process_downloads(max_items, max_size_mb, download_dir, file_types, dry_run,
         click.echo(f"Valid types: {', '.join(sorted(valid_types))}")
         return
     
-    downloader = DownloadProcessor(storage, client, download_dir, file_types_list)
+    downloader = DownloadProcessor(storage, client, download_dir, file_types_list, parallel_workers, file_concurrency)
     
     mode = "continuous" if continuous else "single batch"
     action = "Would process" if dry_run else "Processing"
@@ -1971,7 +1973,9 @@ def process_downloads(max_items, max_size_mb, download_dir, file_types, dry_run,
 @click.argument('item_id')
 @click.option('--download-dir', default=None, help='Directory to store downloaded files (default: ./data/downloads)')
 @click.option('--file-types', default='pdf,jp2,ocr,metadata', help='Comma-separated file types to download (pdf,jp2,ocr,metadata)')
-def download_page(item_id, download_dir, file_types):
+@click.option('--parallel-workers', default=None, type=int, help='Number of parallel workers (default: CPU core count)')
+@click.option('--file-concurrency', default=None, type=int, help='Number of concurrent file downloads per item (default: 6)')
+def download_page(item_id, download_dir, file_types, parallel_workers, file_concurrency):
     """Download a specific page by item ID."""
     config = Config()
     storage = NewsStorage(**config.get_storage_config())
@@ -1986,7 +1990,7 @@ def download_page(item_id, download_dir, file_types):
         click.echo(f"Valid types: {', '.join(sorted(valid_types))}")
         return
     
-    downloader = DownloadProcessor(storage, client, download_dir, file_types_list)
+    downloader = DownloadProcessor(storage, client, download_dir, file_types_list, parallel_workers, file_concurrency)
     
     click.echo(f"📥 Downloading page {item_id}...")
     
@@ -2242,7 +2246,9 @@ def cleanup_downloads(download_dir):
 @click.option('--max-items', default=10, type=int, help='Maximum items to download')
 @click.option('--download-dir', default=None, help='Directory to store files (default: ./data/downloads)')
 @click.option('--file-types', default='pdf,jp2,ocr,metadata', help='Comma-separated file types to download (pdf,jp2,ocr,metadata)')
-def download_priority(priority, queue_type, max_items, download_dir, file_types):
+@click.option('--parallel-workers', default=None, type=int, help='Number of parallel workers (default: CPU core count)')
+@click.option('--file-concurrency', default=None, type=int, help='Number of concurrent file downloads per item (default: 6)')
+def download_priority(priority, queue_type, max_items, download_dir, file_types, parallel_workers, file_concurrency):
     """Download items from queue with specific priority or type."""
     config = Config()
     
@@ -2260,7 +2266,7 @@ def download_priority(priority, queue_type, max_items, download_dir, file_types)
         click.echo(f"Valid types: {', '.join(sorted(valid_types))}")
         return
     
-    downloader = DownloadProcessor(storage, client, download_dir, file_types_list)
+    downloader = DownloadProcessor(storage, client, download_dir, file_types_list, parallel_workers, file_concurrency)
     
     # Filter queue items
     all_queue = storage.get_download_queue(status='queued')

@@ -111,11 +111,13 @@ class ProgressStats:
 class BackgroundProcessManager:
     """Manages background discovery and download processes."""
     
-    def __init__(self, db_path: str, downloads_dir: str, log_dir: str = "logs"):
+    def __init__(self, db_path: str, downloads_dir: str, log_dir: str = "logs", parallel_workers: int = 8, file_concurrency: int = 6):
         self.db_path = db_path
         self.downloads_dir = downloads_dir
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(exist_ok=True)
+        self.parallel_workers = parallel_workers
+        self.file_concurrency = file_concurrency
         
         # Process definitions - use absolute path to main.py
         main_py_path = str(Path(__file__).parent / "main.py")
@@ -132,7 +134,9 @@ class BackgroundProcessManager:
             name="Downloads",
             command=[
                 sys.executable, main_py_path, "process-downloads",
-                "--max-items", "50", "--continuous", "--max-idle-minutes", "30"
+                "--max-items", "50", "--continuous", "--max-idle-minutes", "30",
+                "--parallel-workers", str(self.parallel_workers),
+                "--file-concurrency", str(self.file_concurrency)
             ]
         )
         
@@ -681,12 +685,14 @@ class TUIMonitor:
     """Rich TUI for monitoring batch discovery and downloads."""
     
     def __init__(self, db_path: str = "data/newsagger.db", 
-                 downloads_dir: str = "downloads"):
+                 downloads_dir: str = "downloads",
+                 parallel_workers: int = 8,
+                 file_concurrency: int = 6):
         self.db_path = db_path
         self.downloads_dir = downloads_dir
         
         self.console = Console()
-        self.process_manager = BackgroundProcessManager(db_path, downloads_dir)
+        self.process_manager = BackgroundProcessManager(db_path, downloads_dir, parallel_workers=parallel_workers, file_concurrency=file_concurrency)
         self.progress_monitor = ProgressMonitor(db_path, downloads_dir)
         
         self.shutdown_requested = False
@@ -1304,6 +1310,18 @@ def main():
         default="downloads",
         help='Path to downloads directory'
     )
+    parser.add_argument(
+        '--parallel-workers',
+        type=int,
+        default=8,
+        help='Number of parallel download workers (default: 8)'
+    )
+    parser.add_argument(
+        '--file-concurrency',
+        type=int,
+        default=6,
+        help='Number of concurrent file downloads per item (default: 6)'
+    )
     
     args = parser.parse_args()
     
@@ -1315,7 +1333,7 @@ def main():
         sys.exit(1)
     
     # Create and run monitor
-    monitor = TUIMonitor(args.db_path, args.downloads_dir)
+    monitor = TUIMonitor(args.db_path, args.downloads_dir, args.parallel_workers, args.file_concurrency)
     monitor.run()
 
 

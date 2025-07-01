@@ -1,0 +1,159 @@
+{
+  "queue_processing": {
+    "serial": {
+      "duration_seconds": 2.002800941467285,
+      "throughput_items_per_second": 9.986014878417057
+    },
+    "parallel": {
+      "2_workers": {
+        "duration_seconds": 1.0032124519348145,
+        "speedup_factor": 1.9963876421237052,
+        "throughput_items_per_second": 19.935956697335268
+      },
+      "4_workers": {
+        "duration_seconds": 0.5020816326141357,
+        "speedup_factor": 3.9889946402530434,
+        "throughput_items_per_second": 39.83415982749279
+      },
+      "6_workers": {
+        "duration_seconds": 0.4012570381164551,
+        "speedup_factor": 4.99131666541889,
+        "throughput_items_per_second": 49.843362483764054
+      },
+      "8_workers": {
+        "duration_seconds": 0.30116820335388184,
+        "speedup_factor": 6.650107545098089,
+        "throughput_items_per_second": 66.40807288842305
+      }
+    }
+  },
+  "file_concurrency": {
+    "3_workers": {
+      "duration_seconds": 0.12061548233032227,
+      "files_processed": 15,
+      "total_size_mb": 15.0,
+      "throughput_mb_per_second": 124.36214414763451,
+      "throughput_files_per_second": 124.36214414763451
+    },
+    "6_workers": {
+      "duration_seconds": 0.07101798057556152,
+      "files_processed": 15,
+      "total_size_mb": 15.0,
+      "throughput_mb_per_second": 211.2141161778085,
+      "throughput_files_per_second": 211.2141161778085
+    },
+    "9_workers": {
+      "duration_seconds": 0.05101442337036133,
+      "files_processed": 15,
+      "total_size_mb": 15.0,
+      "throughput_mb_per_second": 294.0344908164696,
+      "throughput_files_per_second": 294.0344908164696
+    },
+    "12_workers": {
+      "duration_seconds": 0.05095410346984863,
+      "files_processed": 15,
+      "total_size_mb": 15.0,
+      "throughput_mb_per_second": 294.3825713443479,
+      "throughput_files_per_second": 294.3825713443479
+    },
+    "16_workers": {
+      "duration_seconds": 0.041649818420410156,
+      "files_processed": 15,
+      "total_size_mb": 15.0,
+      "throughput_mb_per_second": 360.1456277333822,
+      "throughput_files_per_second": 360.1456277333822
+    }
+  },
+  "database_batching": {
+    "batch_size_10": {
+      "duration_seconds": 0.301694393157959,
+      "updates_processed": 200,
+      "throughput_updates_per_second": 662.9224955310503,
+      "batch_size": 10,
+      "num_batches": 20
+    },
+    "batch_size_25": {
+      "duration_seconds": 0.18066096305847168,
+      "updates_processed": 200,
+      "throughput_updates_per_second": 1107.0460193177935,
+      "batch_size": 25,
+      "num_batches": 8
+    },
+    "batch_size_50": {
+      "duration_seconds": 0.14042448997497559,
+      "updates_processed": 200,
+      "throughput_updates_per_second": 1424.252992021841,
+      "batch_size": 50,
+      "num_batches": 4
+    },
+    "batch_size_100": {
+      "duration_seconds": 0.12023115158081055,
+      "updates_processed": 200,
+      "throughput_updates_per_second": 1663.462400304589,
+      "batch_size": 100,
+      "num_batches": 2
+    }
+  },
+  "io_chunk_sizes": {
+    "chunk_8192": {
+      "chunk_size_bytes": 8192,
+      "chunk_size_kb": 8.0,
+      "write_duration_seconds": 0.011757373809814453,
+      "read_duration_seconds": 3.4564738273620605,
+      "total_duration_seconds": 3.468231201171875,
+      "write_throughput_mb_per_second": 850.5300725960174,
+      "read_throughput_mb_per_second": 2.8931218633389393,
+      "data_size_mb": 10
+    },
+    "chunk_32768": {
+      "chunk_size_bytes": 32768,
+      "chunk_size_kb": 32.0,
+      "write_duration_seconds": 0.008548259735107422,
+      "read_duration_seconds": 0.26405811309814453,
+      "total_duration_seconds": 0.27260637283325195,
+      "write_throughput_mb_per_second": 1169.8287499302728,
+      "read_throughput_mb_per_second": 37.87045163154378,
+      "data_size_mb": 10
+    },
+    "chunk_65536": {
+      "chunk_size_bytes": 65536,
+      "chunk_size_kb": 64.0,
+      "write_duration_seconds": 0.009387731552124023,
+      "read_duration_seconds": 0.1465132236480713,
+      "total_duration_seconds": 0.1559009552001953,
+      "write_throughput_mb_per_second": 1065.2200634920634,
+      "read_throughput_mb_per_second": 68.25322486945116,
+      "data_size_mb": 10
+    },
+    "chunk_131072": {
+      "chunk_size_bytes": 131072,
+      "chunk_size_kb": 128.0,
+      "write_duration_seconds": 0.007857561111450195,
+      "read_duration_seconds": 0.08220601081848145,
+      "total_duration_seconds": 0.09006357192993164,
+      "write_throughput_mb_per_second": 1272.6595260490942,
+      "read_throughput_mb_per_second": 121.64560596524912,
+      "data_size_mb": 10
+    },
+    "chunk_262144": {
+      "chunk_size_bytes": 262144,
+      "chunk_size_kb": 256.0,
+      "write_duration_seconds": 0.008081197738647461,
+      "read_duration_seconds": 0.052390336990356445,
+      "total_duration_seconds": 0.060471534729003906,
+      "write_throughput_mb_per_second": 1237.4403304322173,
+      "read_throughput_mb_per_second": 190.87489362476734,
+      "data_size_mb": 10
+    }
+  },
+  "memory_overhead": {
+    "error": "psutil not available"
+  },
+  "recommendations": [
+    "Use parallel queue processing with 8_workers: 565.0% faster than serial",
+    "Optimal file download concurrency: 16_workers (360.1 MB/s)",
+    "Optimal database batch size: batch_size_100 (1663 updates/s)",
+    "Optimal I/O chunk size: 256KB (1428.3 MB/s total)"
+  ],
+  "timestamp": "2025-06-30T21:01:42.285617"
+}

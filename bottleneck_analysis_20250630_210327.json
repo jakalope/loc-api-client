@@ -1,0 +1,352 @@
+{
+  "queue_bottlenecks": {
+    "current_implementation": {
+      "queue_fetch": {
+        "duration_seconds": 0.0050868988037109375,
+        "percentage_of_total": 0.4348207984390798
+      },
+      "item_processing": {
+        "duration_seconds": 1.0017011165618896,
+        "percentage_of_total": 85.6239717178988
+      },
+      "database_updates": {
+        "duration_seconds": 0.06157994270324707,
+        "percentage_of_total": 5.263764994602442
+      },
+      "file_operations": {
+        "duration_seconds": 0.1015160083770752,
+        "percentage_of_total": 8.677442489059679
+      }
+    },
+    "total_time_seconds": 1.1698839664459229,
+    "primary_bottleneck": "item_processing",
+    "bottleneck_analysis": [
+      "Primary bottleneck: Item processing (85.6%) - Parallel queue processing would provide major improvement"
+    ]
+  },
+  "parallel_queue_test": {
+    "1_workers": {
+      "duration_seconds": 1.1302905082702637,
+      "speedup_factor": 1.0,
+      "throughput_items_per_second": 17.694566001980263
+    },
+    "2_workers": {
+      "duration_seconds": 0.5778441429138184,
+      "speedup_factor": 1.9560473565946295,
+      "throughput_items_per_second": 34.611409054262694
+    },
+    "4_workers": {
+      "duration_seconds": 0.3018150329589844,
+      "speedup_factor": 3.744977502243456,
+      "throughput_items_per_second": 66.26575158937803
+    },
+    "6_workers": {
+      "duration_seconds": 0.2464895248413086,
+      "speedup_factor": 4.585551897176772,
+      "throughput_items_per_second": 81.13935070010021
+    },
+    "8_workers": {
+      "duration_seconds": 0.19148945808410645,
+      "speedup_factor": 5.902625238898607,
+      "throughput_items_per_second": 104.44439187464593
+    }
+  },
+  "file_concurrency_scaling": {
+    "light_load": {
+      "6_workers": {
+        "duration_seconds": 0.02661728858947754,
+        "files_processed": 15,
+        "total_size_mb": 17.505000000000003,
+        "throughput_mb_per_second": 657.655265717792,
+        "throughput_files_per_second": 563.5435010435234
+      },
+      "8_workers": {
+        "duration_seconds": 0.024408817291259766,
+        "files_processed": 15,
+        "total_size_mb": 17.505000000000003,
+        "throughput_mb_per_second": 717.1588771025026,
+        "throughput_files_per_second": 614.5320283654692
+      },
+      "12_workers": {
+        "duration_seconds": 0.017824888229370117,
+        "files_processed": 15,
+        "total_size_mb": 17.505,
+        "throughput_mb_per_second": 982.053843746238,
+        "throughput_files_per_second": 841.5200032101441
+      },
+      "16_workers": {
+        "duration_seconds": 0.017580747604370117,
+        "files_processed": 15,
+        "total_size_mb": 17.505,
+        "throughput_mb_per_second": 995.691445774963,
+        "throughput_files_per_second": 853.2060375106796
+      },
+      "20_workers": {
+        "duration_seconds": 0.017665863037109375,
+        "files_processed": 15,
+        "total_size_mb": 17.505,
+        "throughput_mb_per_second": 990.8941308572662,
+        "throughput_files_per_second": 849.0952278125675
+      }
+    },
+    "medium_load": {
+      "6_workers": {
+        "duration_seconds": 0.049292802810668945,
+        "files_processed": 30,
+        "total_size_mb": 35.010000000000005,
+        "throughput_mb_per_second": 710.2456749004833,
+        "throughput_files_per_second": 608.6081190235503
+      },
+      "8_workers": {
+        "duration_seconds": 0.04062628746032715,
+        "files_processed": 30,
+        "total_size_mb": 35.010000000000005,
+        "throughput_mb_per_second": 861.7573051485045,
+        "throughput_files_per_second": 738.4381363740398
+      },
+      "12_workers": {
+        "duration_seconds": 0.03281044960021973,
+        "files_processed": 30,
+        "total_size_mb": 35.010000000000005,
+        "throughput_mb_per_second": 1067.038106047945,
+        "throughput_files_per_second": 914.3428500839286
+      },
+      "16_workers": {
+        "duration_seconds": 0.025409936904907227,
+        "files_processed": 30,
+        "total_size_mb": 35.01,
+        "throughput_mb_per_second": 1377.8074353753623,
+        "throughput_files_per_second": 1180.6404759000534
+      },
+      "20_workers": {
+        "duration_seconds": 0.019841432571411133,
+        "files_processed": 30,
+        "total_size_mb": 35.010000000000005,
+        "throughput_mb_per_second": 1764.4895283642352,
+        "throughput_files_per_second": 1511.9875992838347
+      }
+    },
+    "heavy_load": {
+      "6_workers": {
+        "duration_seconds": 0.09090018272399902,
+        "files_processed": 60,
+        "total_size_mb": 70.01999999999998,
+        "throughput_mb_per_second": 770.2954812819495,
+        "throughput_files_per_second": 660.0646797617393
+      },
+      "8_workers": {
+        "duration_seconds": 0.06882238388061523,
+        "files_processed": 60,
+        "total_size_mb": 70.01999999999998,
+        "throughput_mb_per_second": 1017.4015494938715,
+        "throughput_files_per_second": 871.8093825997187
+      },
+      "12_workers": {
+        "duration_seconds": 0.05031323432922363,
+        "files_processed": 60,
+        "total_size_mb": 70.01999999999998,
+        "throughput_mb_per_second": 1391.681551255988,
+        "throughput_files_per_second": 1192.5291784541462
+      },
+      "16_workers": {
+        "duration_seconds": 0.04182910919189453,
+        "files_processed": 60,
+        "total_size_mb": 70.01999999999998,
+        "throughput_mb_per_second": 1673.9538888762222,
+        "throughput_files_per_second": 1434.4077882401223
+      },
+      "20_workers": {
+        "duration_seconds": 0.03451681137084961,
+        "files_processed": 60,
+        "total_size_mb": 70.02,
+        "throughput_mb_per_second": 2028.576720129305,
+        "throughput_files_per_second": 1738.2833934269966
+      }
+    }
+  },
+  "database_batch_impact": {
+    "small_batch": {
+      "batch_10": {
+        "duration_seconds": 0.07076883316040039,
+        "items_processed": 100,
+        "throughput_items_per_second": 1413.0514173286706,
+        "batch_size": 10,
+        "num_transactions": 10
+      },
+      "batch_25": {
+        "duration_seconds": 0.04032182693481445,
+        "items_processed": 100,
+        "throughput_items_per_second": 2480.046357067679,
+        "batch_size": 25,
+        "num_transactions": 4
+      },
+      "batch_50": {
+        "duration_seconds": 0.03016352653503418,
+        "items_processed": 100,
+        "throughput_items_per_second": 3315.2622218709243,
+        "batch_size": 50,
+        "num_transactions": 2
+      },
+      "batch_100": {
+        "duration_seconds": 0.02507781982421875,
+        "items_processed": 100,
+        "throughput_items_per_second": 3987.5874657742625,
+        "batch_size": 100,
+        "num_transactions": 1
+      },
+      "batch_200": {
+        "duration_seconds": 0.02507472038269043,
+        "items_processed": 100,
+        "throughput_items_per_second": 3988.080364358996,
+        "batch_size": 200,
+        "num_transactions": 1
+      }
+    },
+    "medium_batch": {
+      "batch_10": {
+        "duration_seconds": 0.35373711585998535,
+        "items_processed": 500,
+        "throughput_items_per_second": 1413.4790430018313,
+        "batch_size": 10,
+        "num_transactions": 50
+      },
+      "batch_25": {
+        "duration_seconds": 0.20151090621948242,
+        "items_processed": 500,
+        "throughput_items_per_second": 2481.255279827922,
+        "batch_size": 25,
+        "num_transactions": 20
+      },
+      "batch_50": {
+        "duration_seconds": 0.15078258514404297,
+        "items_processed": 500,
+        "throughput_items_per_second": 3316.032813221426,
+        "batch_size": 50,
+        "num_transactions": 10
+      },
+      "batch_100": {
+        "duration_seconds": 0.12538766860961914,
+        "items_processed": 500,
+        "throughput_items_per_second": 3987.6329590009013,
+        "batch_size": 100,
+        "num_transactions": 5
+      },
+      "batch_200": {
+        "duration_seconds": 0.11522579193115234,
+        "items_processed": 500,
+        "throughput_items_per_second": 4339.30625791447,
+        "batch_size": 200,
+        "num_transactions": 3
+      }
+    },
+    "large_batch": {
+      "batch_10": {
+        "duration_seconds": 0.707453727722168,
+        "items_processed": 1000,
+        "throughput_items_per_second": 1413.5200095980285,
+        "batch_size": 10,
+        "num_transactions": 100
+      },
+      "batch_25": {
+        "duration_seconds": 0.40297508239746094,
+        "items_processed": 1000,
+        "throughput_items_per_second": 2481.5430126612237,
+        "batch_size": 25,
+        "num_transactions": 40
+      },
+      "batch_50": {
+        "duration_seconds": 0.30159616470336914,
+        "items_processed": 1000,
+        "throughput_items_per_second": 3315.6920313742603,
+        "batch_size": 50,
+        "num_transactions": 20
+      },
+      "batch_100": {
+        "duration_seconds": 0.250765323638916,
+        "items_processed": 1000,
+        "throughput_items_per_second": 3987.7921934690135,
+        "batch_size": 100,
+        "num_transactions": 10
+      },
+      "batch_200": {
+        "duration_seconds": 0.22543931007385254,
+        "items_processed": 1000,
+        "throughput_items_per_second": 4435.783624747636,
+        "batch_size": 200,
+        "num_transactions": 5
+      }
+    }
+  },
+  "combined_optimization": {
+    "conservative": {
+      "baseline_time_normalized": 1.0,
+      "optimized_time_normalized": 0.20725388601036268,
+      "total_speedup_factor": 4.825,
+      "improvement_percentage": 382.5,
+      "individual_contributions": {
+        "parallel_queue": "300%",
+        "file_concurrency": "80%",
+        "database_batch": "50%",
+        "io_chunk": "20%"
+      }
+    },
+    "realistic": {
+      "baseline_time_normalized": 1.0,
+      "optimized_time_normalized": 0.14224751066856328,
+      "total_speedup_factor": 7.03,
+      "improvement_percentage": 603.0,
+      "individual_contributions": {
+        "parallel_queue": "500%",
+        "file_concurrency": "120%",
+        "database_batch": "100%",
+        "io_chunk": "40%"
+      }
+    },
+    "optimistic": {
+      "baseline_time_normalized": 1.0,
+      "optimized_time_normalized": 0.10758472296933835,
+      "total_speedup_factor": 9.295,
+      "improvement_percentage": 829.5,
+      "individual_contributions": {
+        "parallel_queue": "700%",
+        "file_concurrency": "180%",
+        "database_batch": "150%",
+        "io_chunk": "60%"
+      }
+    }
+  },
+  "timestamp": "2025-06-30T21:03:27.253897",
+  "summary": {
+    "primary_bottleneck": {
+      "operation": "item_processing",
+      "percentage_of_time": 85.6239717178988
+    },
+    "optimization_priority": [
+      "Parallel queue processing (highest impact)",
+      "Increase file download concurrency",
+      "Larger database batch sizes",
+      "Optimize I/O chunk sizes"
+    ],
+    "expected_improvements": {
+      "conservative": {
+        "speedup": "4.8x",
+        "improvement": "382%"
+      },
+      "realistic": {
+        "speedup": "7.0x",
+        "improvement": "603%"
+      },
+      "optimistic": {
+        "speedup": "9.3x",
+        "improvement": "830%"
+      }
+    },
+    "implementation_recommendations": [
+      "Implement parallel queue processing with 6-8 workers as first priority",
+      "Increase file download ThreadPoolExecutor from 6 to 12-16 workers",
+      "Change database batch size from 10 to 50-100 items",
+      "Increase I/O chunk size from 64KB to 256KB",
+      "Consider async I/O for metadata and OCR text operations"
+    ]
+  }
+}
