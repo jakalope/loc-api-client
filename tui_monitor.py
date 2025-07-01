@@ -56,6 +56,9 @@ class ProcessStatus:
     status_text: str = "Not Started"
     error_count: int = 0
     restart_count: int = 0
+    stall_detected_time: Optional[datetime] = None
+    last_auto_restart: Optional[datetime] = None
+    auto_restart_count: int = 0
 
 
 @dataclass
@@ -697,6 +700,59 @@ class TUIMonitor:
         """Handle shutdown signals."""
         self.shutdown_requested = True
     
+    def _check_and_handle_download_stalls(self, stats: ProgressStats, processes: List[ProcessStatus]):
+        """Check for download stalls and auto-restart if needed."""
+        # Find the download process
+        download_process = None
+        for process in processes:
+            if "Downloads" in process.name:
+                download_process = process
+                break
+        
+        if not download_process:
+            return
+        
+        now = datetime.now()
+        
+        # Check if downloads are stalled
+        if stats.downloads_stalled and download_process.is_running:
+            # Mark when stall was first detected
+            if download_process.stall_detected_time is None:
+                download_process.stall_detected_time = now
+                download_process.status_text = f"Stalled: {stats.downloads_stall_reason}"
+            
+            # Calculate how long downloads have been stalled
+            stall_duration = now - download_process.stall_detected_time
+            stall_minutes = stall_duration.total_seconds() / 60
+            
+            # Auto-restart if stalled for over 60 minutes (but not if CAPTCHA is active)
+            if stall_minutes > 60 and not stats.captcha_backoff_active:
+                # Check if we've already restarted recently (avoid restart loops)
+                if download_process.last_auto_restart:
+                    time_since_restart = (now - download_process.last_auto_restart).total_seconds() / 60
+                    if time_since_restart < 30:  # Don't restart more than once per 30 minutes
+                        return
+                
+                # Perform auto-restart
+                download_process.status_text = "Auto-restarting due to prolonged stall..."
+                download_process.last_auto_restart = now
+                download_process.auto_restart_count += 1
+                
+                # Stop the process
+                self.process_manager.stop_process(download_process)
+                time.sleep(2)  # Brief pause
+                
+                # Start it again
+                self.process_manager.start_process(download_process)
+                download_process.stall_detected_time = None  # Reset stall detection
+                download_process.status_text = f"Auto-restarted (#{download_process.auto_restart_count})"
+        else:
+            # Downloads not stalled, reset stall detection
+            if download_process.stall_detected_time is not None:
+                download_process.stall_detected_time = None
+                if download_process.is_running:
+                    download_process.status_text = "Running"
+    
     def create_layout(self, stats: ProgressStats, processes: List[ProcessStatus]) -> Layout:
         """Create the TUI layout."""
         layout = Layout()
@@ -870,6 +926,14 @@ class TUIMonitor:
                 time_since = datetime.now() - stats.last_download_time
                 minutes_since = int(time_since.total_seconds() / 60)
                 content.append(Text(f"Last download: {minutes_since} minutes ago", style="dim"))
+            
+            # Check if we're approaching auto-restart threshold
+            download_process = next((p for p in self.process_manager.processes if "Downloads" in p.name), None)
+            if download_process and download_process.stall_detected_time:
+                stall_duration = (datetime.now() - download_process.stall_detected_time).total_seconds() / 60
+                if stall_duration > 45:  # Show warning when approaching 60 minute threshold
+                    remaining = 60 - stall_duration
+                    content.append(Text(f"Auto-restart in {int(remaining)} minutes", style="bold yellow"))
         
         download_stats = Progress(
             TextColumn("[blue]Items Downloaded"),
@@ -921,6 +985,7 @@ class TUIMonitor:
         table.add_column("Status", justify="center")
         table.add_column("Uptime", justify="right", style="blue")
         table.add_column("Restarts", justify="center", style="red")
+        table.add_column("Auto-Restarts", justify="center", style="magenta")
         
         for process in processes:
             # Determine status and color
@@ -948,7 +1013,8 @@ class TUIMonitor:
                 pid,
                 status,
                 uptime,
-                str(process.restart_count)
+                str(process.restart_count),
+                str(process.auto_restart_count)
             )
         
         # Add summary row
@@ -957,6 +1023,7 @@ class TUIMonitor:
             "[bold]Total[/bold]",
             "",
             f"[green]{running_count}/{len(processes)}[/green]",
+            "",
             "",
             "",
             style="dim"
@@ -1197,6 +1264,9 @@ class TUIMonitor:
                         # Use default stats if database is slow
                         stats = ProgressStats()
                         stats.rate_limit_reason = f"Database timeout: {str(e)[:50]}"
+                    
+                    # Check for download stalls and auto-restart if needed
+                    self._check_and_handle_download_stalls(stats, processes)
                     
                     # Update display
                     layout = self.create_layout(stats, processes)
