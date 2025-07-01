@@ -945,33 +945,90 @@ class TUIMonitor:
         """Create rate limiting status panel."""
         content = []
         
-        # Current rate limiting status
-        if stats.is_rate_limited:
-            if stats.captcha_backoff_active:
-                content.append(f"[red]🚫 CAPTCHA Blocked[/red]")
-                content.append(f"[red]Reason: {stats.rate_limit_reason}[/red]")
-                if stats.cooldown_remaining_minutes > 0:
-                    hours = int(stats.cooldown_remaining_minutes // 60)
-                    minutes = int(stats.cooldown_remaining_minutes % 60)
-                    content.append(f"[red]Cooldown: {hours}h {minutes}m[/red]")
-                content.append(f"[yellow]Backoff: {stats.backoff_multiplier:.1f}x[/yellow]")
-            elif "Throttled/Idle" in stats.rate_limit_reason:
-                content.append(f"[yellow]⏸️ Throttled/Idle State[/yellow]")
-                content.append(f"[dim]{stats.rate_limit_reason}[/dim]")
-                content.append(f"[dim]Enforced {stats.current_request_delay:.0f}s delays[/dim]")
+        # Get real-time CAPTCHA status from GlobalCaptchaManager
+        try:
+            from newsagger.rate_limited_client import GlobalCaptchaManager
+            captcha_manager = GlobalCaptchaManager()
+            captcha_status = captcha_manager.get_status()
+            
+            if captcha_status['blocked']:
+                # Calculate remaining time more accurately
+                if captcha_status['last_captcha_time']:
+                    current_time = time.time()
+                    cooling_off_hours = captcha_status['cooling_off_hours']
+                    end_time = captcha_status['last_captcha_time'] + (cooling_off_hours * 3600)
+                    remaining_seconds = max(0, end_time - current_time)
+                    remaining_minutes = remaining_seconds / 60
+                    
+                    content.append(f"[bold red]🚫 CAPTCHA DETECTED - ALL OPERATIONS PAUSED[/bold red]")
+                    content.append(f"[red]{captcha_status['reason']}[/red]")
+                    
+                    if remaining_minutes > 0:
+                        hours = int(remaining_minutes // 60)
+                        minutes = int(remaining_minutes % 60)
+                        seconds = int(remaining_seconds % 60)
+                        if hours > 0:
+                            content.append(f"[bold red]Time Remaining: {hours}h {minutes}m {seconds}s[/bold red]")
+                        elif minutes > 0:
+                            content.append(f"[bold red]Time Remaining: {minutes}m {seconds}s[/bold red]")
+                        else:
+                            content.append(f"[bold red]Time Remaining: {seconds}s[/bold red]")
+                        
+                        # Show when operations will resume
+                        resume_time = datetime.fromtimestamp(end_time).strftime("%H:%M:%S")
+                        content.append(f"[yellow]Resume Time: {resume_time}[/yellow]")
+                    
+                    content.append(f"[yellow]Consecutive CAPTCHAs: {captcha_status['consecutive_captchas']}[/yellow]")
+                    content.append(f"[yellow]Backoff Multiplier: {captcha_status['cooling_off_multiplier']:.1f}x[/yellow]")
+                else:
+                    content.append(f"[red]🚫 CAPTCHA Block Active[/red]")
+                    content.append(f"[red]{captcha_status['reason']}[/red]")
             else:
-                content.append(f"[yellow]⚠️ Rate Limited[/yellow]")
-                content.append(f"[yellow]{stats.rate_limit_reason}[/yellow]")
-        else:
-            if stats.requests_per_minute > 0:
-                content.append("[green]✅ Normal Operation[/green]")
-                content.append(f"[green]Active: {stats.requests_per_minute} req/min[/green]")
-            elif "Separate process" in stats.rate_limit_reason:
-                content.append("[green]✅ Background Processes Active[/green]")
-                content.append("[dim]Discovery & downloads running[/dim]")
+                # No CAPTCHA block, show normal rate limiting status
+                if stats.is_rate_limited and not stats.captcha_backoff_active:
+                    if "Throttled/Idle" in stats.rate_limit_reason:
+                        content.append(f"[yellow]⏸️ Throttled/Idle State[/yellow]")
+                        content.append(f"[dim]{stats.rate_limit_reason}[/dim]")
+                    else:
+                        content.append(f"[yellow]⚠️ Rate Limited[/yellow]")
+                        content.append(f"[yellow]{stats.rate_limit_reason}[/yellow]")
+                else:
+                    if stats.requests_per_minute > 0:
+                        content.append("[green]✅ Normal Operation[/green]")
+                        content.append(f"[green]Active: {stats.requests_per_minute} req/min[/green]")
+                    elif "Separate process" in stats.rate_limit_reason:
+                        content.append("[green]✅ Background Processes Active[/green]")
+                        content.append("[dim]Discovery & downloads running[/dim]")
+                    else:
+                        content.append("[blue]ℹ️ Monitor Mode[/blue]")
+                        content.append("[dim]Monitoring external processes[/dim]")
+        except Exception as e:
+            # Fallback to original display if we can't get CAPTCHA status
+            if stats.is_rate_limited:
+                if stats.captcha_backoff_active:
+                    content.append(f"[red]🚫 CAPTCHA Blocked[/red]")
+                    content.append(f"[red]Reason: {stats.rate_limit_reason}[/red]")
+                    if stats.cooldown_remaining_minutes > 0:
+                        hours = int(stats.cooldown_remaining_minutes // 60)
+                        minutes = int(stats.cooldown_remaining_minutes % 60)
+                        content.append(f"[red]Cooldown: {hours}h {minutes}m[/red]")
+                    content.append(f"[yellow]Backoff: {stats.backoff_multiplier:.1f}x[/yellow]")
+                elif "Throttled/Idle" in stats.rate_limit_reason:
+                    content.append(f"[yellow]⏸️ Throttled/Idle State[/yellow]")
+                    content.append(f"[dim]{stats.rate_limit_reason}[/dim]")
+                else:
+                    content.append(f"[yellow]⚠️ Rate Limited[/yellow]")
+                    content.append(f"[yellow]{stats.rate_limit_reason}[/yellow]")
             else:
-                content.append("[blue]ℹ️ Monitor Mode[/blue]")
-                content.append("[dim]Monitoring external processes[/dim]")
+                if stats.requests_per_minute > 0:
+                    content.append("[green]✅ Normal Operation[/green]")
+                    content.append(f"[green]Active: {stats.requests_per_minute} req/min[/green]")
+                elif "Separate process" in stats.rate_limit_reason:
+                    content.append("[green]✅ Background Processes Active[/green]")
+                    content.append("[dim]Discovery & downloads running[/dim]")
+                else:
+                    content.append("[blue]ℹ️ Monitor Mode[/blue]")
+                    content.append("[dim]Monitoring external processes[/dim]")
         
         # Request rate information
         content.append("")
